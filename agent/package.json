@@ -1,0 +1,36 @@
+{
+  "name": "agent",
+  "version": "1.0.0",
+  "description": "EigenX TEE TypeScript Application",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "yellow:session": "ts-node src/shared/yellow/cli.ts",
+    "test:yellow": "ts-node src/shared/yellow/test-yellow.ts",
+    "test:yellow:demo": "ts-node src/shared/yellow/test-yellow-demo.ts"
+  },
+  "dependencies": {
+    "@erc7824/nitrolite": "^0.5.3",
+    "@pythnetwork/hermes-client": "^2.1.0",
+    "@pythnetwork/pyth-evm-js": "^2.0.0",
+    "@types/ws": "^8.18.1",
+    "dotenv": "^16.6.1",
+    "ethers": "^6.16.0",
+    "viem": "^2.0.0",
+    "ws": "^8.19.0",
+    "yellow-ts": "^0.0.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "eigenx"
+  ]
+}
