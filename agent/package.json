@@ -9,7 +9,10 @@
     "dev": "ts-node src/index.ts",
     "yellow:session": "ts-node src/shared/yellow/cli.ts",
     "test:yellow": "ts-node src/shared/yellow/test-yellow.ts",
-    "test:yellow:demo": "ts-node src/shared/yellow/test-yellow-demo.ts"
+    "test:yellow:demo": "ts-node src/shared/yellow/test-yellow-demo.ts",
+    "test:yellow:communication": "ts-node src/test-yellow-communication.ts",
+    "test:yellow:simulation": "ts-node src/test-yellow-simulation.ts",
+    "test:full": "ts-node src/test-full-integration.ts"
   },
   "dependencies": {
     "@erc7824/nitrolite": "^0.5.3",

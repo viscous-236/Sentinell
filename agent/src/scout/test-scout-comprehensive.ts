@@ -81,9 +81,20 @@ async function main() {
   let flashLoanCount = 0;
   let gasUpdateCount = 0;
 
+  // Helper function to get block explorer URL
+  const getExplorerUrl = (chain: string, txHash: string): string => {
+    const explorers: Record<string, string> = {
+      ethereum: 'https://etherscan.io/tx/',
+      base: 'https://basescan.org/tx/',
+      arbitrum: 'https://arbiscan.io/tx/',
+    };
+    return explorers[chain] + txHash;
+  };
+
   scout.on('transaction', (tx) => {
     transactionCount++;
-    console.log(`💰 [${tx.chain}] Transaction: ${tx.hash.substring(0, 10)}... | Value: ${ethers.formatEther(tx.value)} ETH`);
+    const explorerUrl = getExplorerUrl(tx.chain, tx.hash);
+    console.log(`💰 [${tx.chain}] Transaction: ${tx.hash} | Value: ${ethers.formatEther(tx.value)} ETH | ${explorerUrl}`);
   });
 
   scout.on('price', (price) => {
@@ -100,7 +111,8 @@ async function main() {
   scout.on('flashloan', (loan) => {
     flashLoanCount++;
     const amount = ethers.formatUnits(loan.amount, 18);
-    console.log(`⚡ [${loan.chain}] Flash Loan: ${loan.protocol} | ${amount} tokens | TX: ${loan.txHash.substring(0, 10)}...`);
+    const explorerUrl = getExplorerUrl(loan.chain, loan.txHash);
+    console.log(`⚡ [${loan.chain}] Flash Loan: ${loan.protocol} | ${amount} tokens | TX: ${loan.txHash} | ${explorerUrl}`);
   });
 
   scout.on('gasUpdate', (gas) => {
