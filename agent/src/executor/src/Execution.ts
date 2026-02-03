@@ -20,6 +20,14 @@
 import { EventEmitter } from "events";
 import { ethers } from "ethers";
 import type { RiskDecision, DefenseAction, ThreatTier } from "./RiskEngine";
+import {
+  CrossChainOrchestrator,
+  CrossChainOrchestratorConfig,
+  createCrossChainOrchestrator,
+  type CrossChainAction,
+  type ExecutionResult,
+} from "./CrossChainOrchestrator";
+import { ACTIVE_CHAIN_IDS } from "../config/crosschain.config";
 
 // ---------------------------------------------------------------------------
 // TYPES
@@ -44,6 +52,11 @@ export interface ExecutorConfig {
     ethereum: number;
     base: number;
     arbitrum: number;
+  };
+  /** Cross-chain orchestrator configuration */
+  crossChain?: {
+    enabled: boolean;
+    dryRun?: boolean;
   };
 }
 
@@ -91,6 +104,7 @@ export class ExecutorAgent extends EventEmitter {
   private providers: Map<string, ethers.Provider>;
   private wallets: Map<string, ethers.Wallet>;
   private hookContracts: Map<string, ethers.Contract>;
+  private crossChainOrchestrator?: CrossChainOrchestrator;
   
   private protectionStates: Map<string, ProtectionState>;
   
@@ -242,6 +256,12 @@ export class ExecutorAgent extends EventEmitter {
         case "CIRCUIT_BREAKER":
           txHash = await this.activateCircuitBreaker(decision, poolId);
           break;
+        // Cross-chain defense actions
+        case "LIQUIDITY_REROUTE":
+        case "CROSS_CHAIN_ARBITRAGE_BLOCK":
+        case "EMERGENCY_BRIDGE":
+          txHash = await this.executeCrossChainDefense(decision);
+          break;
         default:
           throw new Error(`Unknown action: ${decision.action}`);
       }
@@ -333,6 +353,119 @@ export class ExecutorAgent extends EventEmitter {
     await tx.wait();
     return tx.hash;
   }
+
+  // ---------------------------------------------------------------------------
+  // CROSS-CHAIN DEFENSE EXECUTION
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Initialize the cross-chain orchestrator for defense actions.
+   * Call this before using cross-chain features.
+   */
+  async initializeCrossChainOrchestrator(): Promise<void> {
+    if (!this.config.crossChain?.enabled) {
+      console.log("⚠️ Cross-chain defense is disabled in config");
+      return;
+    }
+
+    if (this.crossChainOrchestrator) {
+      console.log("ℹ️ CrossChainOrchestrator already initialized");
+      return;
+    }
+
+    console.log("🌉 Initializing CrossChainOrchestrator...");
+    
+    this.crossChainOrchestrator = createCrossChainOrchestrator({
+      walletPrivateKey: this.config.agentPrivateKey,
+      integrator: "Sentinell",
+      dryRun: this.config.crossChain?.dryRun ?? true,
+    });
+
+    // Wire up orchestrator events
+    this.crossChainOrchestrator.on("defense:dryrun", (data) => {
+      this.emit("crosschain:dryrun", data);
+    });
+    this.crossChainOrchestrator.on("defense:executed", (data) => {
+      this.emit("crosschain:executed", data);
+    });
+    this.crossChainOrchestrator.on("defense:failed", (data) => {
+      this.emit("crosschain:failed", data);
+    });
+    this.crossChainOrchestrator.on("execution:status", (status) => {
+      this.emit("crosschain:status", status);
+    });
+
+    await this.crossChainOrchestrator.initialize();
+    console.log("✅ CrossChainOrchestrator ready");
+  }
+
+  /**
+   * Execute a cross-chain defense action via the LI.FI orchestrator.
+   */
+  private async executeCrossChainDefense(decision: RiskDecision): Promise<string> {
+    if (!this.crossChainOrchestrator) {
+      throw new Error("CrossChainOrchestrator not initialized. Call initializeCrossChainOrchestrator() first.");
+    }
+
+    const chainId = this.getChainId(decision.chain);
+    const action = decision.action as CrossChainAction;
+
+    console.log(`   Executing cross-chain defense: ${action}`);
+    console.log(`   Source chain: ${decision.chain} (${chainId})`);
+
+    // Determine token and amount from decision context
+    // In production, this would come from pool analysis
+    const tokenSymbol = this.extractTokenFromPair(decision.pair);
+    const amount = "100"; // Default test amount - in production, calculate based on pool analysis
+
+    const result = await this.crossChainOrchestrator.executeDefense({
+      action,
+      fromChainId: chainId,
+      tokenSymbol,
+      amount,
+      triggerPool: decision.targetPool,
+      decisionId: decision.id,
+    });
+
+    if (!result.success) {
+      throw new Error(`Cross-chain defense failed: ${result.error}`);
+    }
+
+    // For dry runs, return a synthetic hash
+    if (result.dryRun) {
+      const dryRunHash = `0xDRYRUN_${decision.id}`;
+      console.log(`   📋 Dry run complete: ${dryRunHash}`);
+      return dryRunHash;
+    }
+
+    return result.txHash || "0xNO_TX_HASH";
+  }
+
+  /**
+   * Get chain ID from chain name.
+   */
+  private getChainId(chain: string): number {
+    switch (chain.toLowerCase()) {
+      case "ethereum":
+        return ACTIVE_CHAIN_IDS.ethereumSepolia;
+      case "base":
+        return ACTIVE_CHAIN_IDS.baseSepolia;
+      case "arbitrum":
+        return ACTIVE_CHAIN_IDS.arbitrumSepolia;
+      default:
+        throw new Error(`Unknown chain: ${chain}`);
+    }
+  }
+
+  /**
+   * Extract primary token from trading pair.
+   * e.g., "ETH/USDC" -> "ETH"
+   */
+  private extractTokenFromPair(pair: string): string {
+    const [token] = pair.split("/");
+    return token || "ETH";
+  }
+
 
   // ---------------------------------------------------------------------------
   // PROTECTION DEACTIVATION

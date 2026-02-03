@@ -48,7 +48,12 @@ export interface ValidatorThreatSignal {
 export type DefenseAction =
   | "MEV_PROTECTION"       // beforeSwap: bump dynamic fee for this block
   | "ORACLE_VALIDATION"    // beforeSwap: reject swap if oracle deviation > threshold
-  | "CIRCUIT_BREAKER";     // pause pool for N blocks
+  | "CIRCUIT_BREAKER"      // pause pool for N blocks
+  // Cross-chain defense actions (via LI.FI Orchestrator)
+  | "LIQUIDITY_REROUTE"           // Move at-risk liquidity to safer chain
+  | "CROSS_CHAIN_ARBITRAGE_BLOCK" // Block detected cross-chain arb exploits
+  | "EMERGENCY_BRIDGE";           // Fast exit to safe haven chain
+
 
 /** Threat tier — drives hysteresis logic. */
 export type ThreatTier = "WATCH" | "ELEVATED" | "CRITICAL";
@@ -132,6 +137,10 @@ export interface RiskEngineConfig {
     MEV_PROTECTION: number;
     ORACLE_VALIDATION: number;
     CIRCUIT_BREAKER: number;
+    // Cross-chain action TTLs
+    LIQUIDITY_REROUTE?: number;
+    CROSS_CHAIN_ARBITRAGE_BLOCK?: number;
+    EMERGENCY_BRIDGE?: number;
   };
 
   /** RPC budget config. See RpcBudget class. */
@@ -152,6 +161,10 @@ interface ResolvedConfig {
     MEV_PROTECTION: number;
     ORACLE_VALIDATION: number;
     CIRCUIT_BREAKER: number;
+    // Cross-chain action TTLs
+    LIQUIDITY_REROUTE: number;
+    CROSS_CHAIN_ARBITRAGE_BLOCK: number;
+    EMERGENCY_BRIDGE: number;
   };
 }
 
@@ -373,7 +386,47 @@ function mapToDefenseAction(
     signalTypes.has("GAS_SPIKE") ||
     signalTypes.has("LARGE_SWAP") ||
     signalTypes.has("MEMPOOL_CLUSTER");
+  const hasCrossChainSignal = signalTypes.has("CROSS_CHAIN_ATTACK");
   const distinctSignalCount = signalTypes.size;
+
+  // --- Cross-chain attack detection (highest priority) ---
+  // Cross-chain attacks require cross-chain defense
+  if (hasCrossChainSignal) {
+    const crossChainSignal = signals.find((s) => s.source === "CROSS_CHAIN_ATTACK");
+    
+    // CRITICAL + cross-chain → EMERGENCY_BRIDGE (get liquidity out ASAP)
+    if (tier === "CRITICAL" && compositeScore > 85) {
+      return {
+        action: "EMERGENCY_BRIDGE",
+        rationale: `CRITICAL tier + cross-chain attack detected (score ${compositeScore.toFixed(1)}). Emergency bridge to safe haven chain initiated.`,
+      };
+    }
+    
+    // CRITICAL with cross-chain + oracle → LIQUIDITY_REROUTE
+    if (tier === "CRITICAL" && hasOracleSignal) {
+      return {
+        action: "LIQUIDITY_REROUTE",
+        rationale: `CRITICAL tier + cross-chain + oracle deviation. Rerouting liquidity to safer chain (score ${compositeScore.toFixed(1)}).`,
+      };
+    }
+    
+    // ELEVATED with cross-chain + MEV patterns → CROSS_CHAIN_ARBITRAGE_BLOCK
+    if (hasMevSignals) {
+      return {
+        action: "CROSS_CHAIN_ARBITRAGE_BLOCK",
+        rationale: `${tier} tier + cross-chain arbitrage pattern detected. Blocking cross-chain arb exploit (score ${compositeScore.toFixed(1)}).`,
+      };
+    }
+    
+    // Cross-chain signal alone at ELEVATED → LIQUIDITY_REROUTE as precaution
+    if (tier === "ELEVATED") {
+      return {
+        action: "LIQUIDITY_REROUTE",
+        rationale: `ELEVATED tier + cross-chain attack signal. Precautionary liquidity reroute (score ${compositeScore.toFixed(1)}).`,
+      };
+    }
+  }
+
 
   // --- CRITICAL tier decision logic ---
   if (tier === "CRITICAL") {
@@ -895,6 +948,10 @@ export class RiskEngine extends EventEmitter {
         MEV_PROTECTION: 12_000,       // 12s — one block window on most chains
         ORACLE_VALIDATION: 60_000,    // 60s — persist while oracle is suspicious
         CIRCUIT_BREAKER: 300_000,     // 5 min — pool pause is a serious action
+        // Cross-chain action TTLs (longer due to bridge finality)
+        LIQUIDITY_REROUTE: 600_000,           // 10 min — temp liquidity move
+        CROSS_CHAIN_ARBITRAGE_BLOCK: 120_000, // 2 min — arb window
+        EMERGENCY_BRIDGE: 900_000,            // 15 min — emergency action
         ...input.actionTtl,
       },
     };

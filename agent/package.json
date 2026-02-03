@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@erc7824/nitrolite": "^0.5.3",
+    "@lifi/sdk": "^3.15.4",
     "@pythnetwork/hermes-client": "^2.1.0",
     "@pythnetwork/pyth-evm-js": "^2.0.0",
     "@types/ws": "^8.18.1",
@@ -26,7 +27,11 @@
     "yellow-ts": "^0.0.10"
   },
   "devDependencies": {
+    "@types/chai-as-promised": "^8.0.2",
     "@types/node": "^20.0.0",
+    "@types/sinon": "^21.0.0",
+    "chai-as-promised": "^8.0.2",
+    "sinon": "^21.0.1",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0"
   },

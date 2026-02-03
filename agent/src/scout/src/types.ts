@@ -3,7 +3,8 @@ export type ScoutSignalType =
     | "GAS_SPIKE"
     | "LARGE_SWAP"
     | "PRICE_MOVE"
-    | "MEMPOOL_CLUSTER";
+    | "MEMPOOL_CLUSTER"
+    | "CROSS_CHAIN_ATTACK";
 
 
 export interface ScoutSignal {
