@@ -22,7 +22,6 @@
  */
 
 import dotenv from 'dotenv';
-import { mnemonicToAccount, privateKeyToAccount } from 'viem/accounts';
 import { YellowMessageBus } from './shared/yellow/YellowMessageBus';
 import { wireAllAgentsToYellow } from './shared/yellow/YellowAgentAdapters';
 import { RiskEngine } from './executor/src/RiskEngine';
@@ -43,52 +42,25 @@ let isShuttingDown = false;
 
 /**
  * Load environment configuration
- * Supports both MNEMONIC (for TEE deployment) and PRIVATE_KEY authentication
  */
 function loadConfig() {
-  const mnemonic = process.env.MNEMONIC;
   const privateKey = process.env.YELLOW_PRIVATE_KEY || process.env.PRIVATE_KEY;
   const rpcUrl = process.env.RPC_URL || process.env.ALCHEMY_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/demo';
 
-  let agentAddress: string;
-  let agentPrivateKey: `0x${string}`;
-
-  // Priority: MNEMONIC (for TEE deployment) > PRIVATE_KEY
-  if (mnemonic) {
-    console.log('🔐 Using MNEMONIC for TEE deployment');
-    try {
-      const account = mnemonicToAccount(mnemonic);
-      agentAddress = account.address;
-      // For TEE deployments, we'll use the derived private key
-      // Note: In production TEE, the private key never leaves the enclave
-      agentPrivateKey = account.getHdKey().privateKey 
-        ? `0x${Buffer.from(account.getHdKey().privateKey!).toString('hex')}` as `0x${string}`
-        : (() => { throw new Error('Failed to derive private key from mnemonic'); })();
-      console.log('   First wallet address:', agentAddress);
-    } catch (error) {
-      console.error('❌ Error generating wallet from mnemonic:', error);
-      throw new Error('Invalid MNEMONIC format');
-    }
-  } else if (privateKey) {
-    console.log('🔑 Using PRIVATE_KEY for authentication');
-    try {
-      const account = privateKeyToAccount(privateKey as `0x${string}`);
-      agentAddress = account.address;
-      agentPrivateKey = privateKey as `0x${string}`;
-      console.log('   Wallet address:', agentAddress);
-    } catch (error) {
-      console.error('❌ Error generating wallet from private key:', error);
-      throw new Error('Invalid PRIVATE_KEY format');
-    }
-  } else {
-    throw new Error('Either MNEMONIC or PRIVATE_KEY environment variable is required');
+  if (!privateKey) {
+    throw new Error('YELLOW_PRIVATE_KEY or PRIVATE_KEY environment variable required');
   }
+
+  // Derive agent address
+  const { privateKeyToAccount } = require('viem/accounts');
+  const account = privateKeyToAccount(privateKey as `0x${string}`);
+  const agentAddress = account.address;
 
   // Yellow Network config
   const yellow: YellowConfig = {
     endPoint: process.env.YELLOW_ENDPOINT || 'wss://clearnet-sandbox.yellow.com/ws',
     agentAddress,
-    privateKey: agentPrivateKey,
+    privateKey: privateKey as `0x${string}`,
     rpcUrl,
     network: (process.env.YELLOW_NETWORK as 'sandbox' | 'production') || 'sandbox',
   };
@@ -202,18 +174,12 @@ function loadConfig() {
       base: process.env.HOOK_ADDRESS_BASE || '0x0000000000000000000000000000000000000001',
       arbitrum: process.env.HOOK_ADDRESS_ARBITRUM || '0x0000000000000000000000000000000000000001',
     },
-    agentPrivateKey,
+    agentPrivateKey: privateKey,
     teeEnabled: process.env.TEE_ENABLED === 'true',
     maxGasPrice: {
       ethereum: parseInt(process.env.MAX_GAS_ETHEREUM || '50'),
       base: parseInt(process.env.MAX_GAS_BASE || '1'),
       arbitrum: parseInt(process.env.MAX_GAS_ARBITRUM || '1'),
-    },
-    // Threat API server for LP bots to query ELEVATED tier threats
-    threatAPI: {
-      enabled: process.env.THREAT_API_ENABLED !== 'false', // Enabled by default
-      port: parseInt(process.env.THREAT_API_PORT || '3000'),
-      retentionMs: parseInt(process.env.THREAT_API_RETENTION_MS || '300000'), // 5 minutes default
     },
   };
 
@@ -257,11 +223,6 @@ async function main(): Promise<void> {
   console.log('\n⚡ Step 3/5: Initializing Executor Agent...');
   executorAgent = new ExecutorAgent(config.executor);
   await executorAgent.initialize();
-  
-  // Log Threat API status
-  if (config.executor.threatAPI?.enabled) {
-    console.log(`🌐 Threat API Server will start on port ${config.executor.threatAPI.port}`);
-  }
 
   // 5. Initialize Scout Agent
   console.log('\n📡 Step 4/5: Initializing Scout Agent...');
@@ -299,7 +260,6 @@ async function main(): Promise<void> {
   console.log('=================================================\n');
 
   riskEngine.start();
-  await executorAgent.start(); // Start executor (includes Threat API server)
   await scoutAgent.initialize();
   await scoutAgent.start();
   await validatorAgent.start();
