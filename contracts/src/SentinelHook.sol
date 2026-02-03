@@ -131,6 +131,18 @@ contract SentinelHook is IHooks, Ownable {
     );
     event AgentRegistryUpdated(address newRegistry);
 
+    // LP Threat Broadcast Event (for ELEVATED tier threats)
+    event ThreatBroadcast(
+        PoolId indexed poolId,
+        string tier,              // "ELEVATED"
+        string action,            // "MEV_PROTECTION", "ORACLE_VALIDATION", etc.
+        uint256 compositeScore,   // 0-100
+        uint256 timestamp,
+        uint256 expiresAt,
+        string rationale,
+        string[] signalTypes
+    );
+
     error Unauthorized();
     error InvalidFee();
     error ProtectionAlreadyActive();
@@ -575,6 +587,49 @@ contract SentinelHook is IHooks, Ownable {
         });
 
         emit OracleConfigured(poolId, chainlinkFeed, deviationThreshold);
+    }
+
+    /**
+     * @notice Broadcast ELEVATED tier threat to LP bots via on-chain event
+     * @dev Only emits event, does not execute any protection
+     * @param poolId The pool identifier
+     * @param tier Must be "ELEVATED"
+     * @param action The recommended defense action
+     * @param compositeScore Risk score 0-100
+     * @param expiresAt Timestamp when threat expires
+     * @param rationale Human-readable explanation
+     * @param signalTypes Array of contributing signal types
+     * @param proof TEE attestation proof
+     */
+    function broadcastThreat(
+        PoolId poolId,
+        string calldata tier,
+        string calldata action,
+        uint256 compositeScore,
+        uint256 expiresAt,
+        string calldata rationale,
+        string[] calldata signalTypes,
+        bytes calldata proof
+    ) external {
+        if (!_isAuthorizedAgent(msg.sender, proof)) revert Unauthorized();
+        require(
+            keccak256(bytes(tier)) == keccak256("ELEVATED"),
+            "Only ELEVATED tier"
+        );
+        require(compositeScore <= 100, "Invalid score");
+        require(expiresAt > block.timestamp, "Invalid expiry");
+        require(bytes(rationale).length > 0, "Empty rationale");
+
+        emit ThreatBroadcast(
+            poolId,
+            tier,
+            action,
+            compositeScore,
+            block.timestamp,
+            expiresAt,
+            rationale,
+            signalTypes
+        );
     }
 
     /*//////////////////////////////////////////////////////////////

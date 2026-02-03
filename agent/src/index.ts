@@ -209,6 +209,12 @@ function loadConfig() {
       base: parseInt(process.env.MAX_GAS_BASE || '1'),
       arbitrum: parseInt(process.env.MAX_GAS_ARBITRUM || '1'),
     },
+    // Threat API server for LP bots to query ELEVATED tier threats
+    threatAPI: {
+      enabled: process.env.THREAT_API_ENABLED !== 'false', // Enabled by default
+      port: parseInt(process.env.THREAT_API_PORT || '3000'),
+      retentionMs: parseInt(process.env.THREAT_API_RETENTION_MS || '300000'), // 5 minutes default
+    },
   };
 
   return { yellow, scout, validator, riskEngine, executor };
@@ -251,6 +257,11 @@ async function main(): Promise<void> {
   console.log('\n⚡ Step 3/5: Initializing Executor Agent...');
   executorAgent = new ExecutorAgent(config.executor);
   await executorAgent.initialize();
+  
+  // Log Threat API status
+  if (config.executor.threatAPI?.enabled) {
+    console.log(`🌐 Threat API Server will start on port ${config.executor.threatAPI.port}`);
+  }
 
   // 5. Initialize Scout Agent
   console.log('\n📡 Step 4/5: Initializing Scout Agent...');
@@ -288,6 +299,7 @@ async function main(): Promise<void> {
   console.log('=================================================\n');
 
   riskEngine.start();
+  await executorAgent.start(); // Start executor (includes Threat API server)
   await scoutAgent.initialize();
   await scoutAgent.start();
   await validatorAgent.start();

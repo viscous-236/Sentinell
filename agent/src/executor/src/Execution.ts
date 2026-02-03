@@ -20,6 +20,8 @@
 import { EventEmitter } from "events";
 import { ethers } from "ethers";
 import type { RiskDecision, DefenseAction, ThreatTier } from "./RiskEngine";
+import type { LPThreatBroadcast } from "./types/LPBroadcast";
+import { ThreatAPIServer } from "./api/ThreatAPIServer";
 import {
   CrossChainOrchestrator,
   CrossChainOrchestratorConfig,
@@ -58,6 +60,12 @@ export interface ExecutorConfig {
     enabled: boolean;
     dryRun?: boolean;
   };
+  /** Threat API server configuration */
+  threatAPI?: {
+    enabled: boolean;
+    port: number;
+    retentionMs?: number;
+  };
 }
 
 /** Maps to on-chain enum */
@@ -89,6 +97,7 @@ const HOOK_ABI = [
   "function activateCircuitBreaker(bytes32 poolId, string calldata reason, bytes calldata proof) external",
   "function deactivateCircuitBreaker(bytes32 poolId, bytes calldata proof) external",
   "function configureOracle(bytes32 poolId, address chainlinkFeed, uint256 deviationThreshold, bytes calldata proof) external",
+  "function broadcastThreat(bytes32 poolId, string calldata tier, string calldata action, uint256 compositeScore, uint256 expiresAt, string calldata rationale, string[] calldata signalTypes, bytes calldata proof) external",
   
   "function isProtectionActive(bytes32 poolId) external view returns (bool)",
   "function isCircuitBreakerActive(bytes32 poolId) external view returns (bool)",
@@ -97,6 +106,7 @@ const HOOK_ABI = [
   
   "event ProtectionActivated(bytes32 indexed poolId, uint24 newFee, uint256 expiryBlock, address activatedBy)",
   "event CircuitBreakerActivated(bytes32 indexed poolId, address indexed activatedBy, uint256 activatedAt, uint256 expiryBlock, string reason)",
+  "event ThreatBroadcast(bytes32 indexed poolId, string tier, string action, uint256 compositeScore, uint256 timestamp, uint256 expiresAt, string rationale, string[] signalTypes)",
 ];
 
 export class ExecutorAgent extends EventEmitter {
@@ -105,6 +115,7 @@ export class ExecutorAgent extends EventEmitter {
   private wallets: Map<string, ethers.Wallet>;
   private hookContracts: Map<string, ethers.Contract>;
   private crossChainOrchestrator?: CrossChainOrchestrator;
+  private threatAPIServer?: ThreatAPIServer;
   
   private protectionStates: Map<string, ProtectionState>;
   
@@ -133,6 +144,13 @@ export class ExecutorAgent extends EventEmitter {
       } catch (error) {
         console.error('❌ Executor: Failed to execute Yellow decision:', error);
         this.emit('execution:failure', { decision, error: (error as Error).message });
+      }
+    });
+
+    // Listen for threat broadcasts to cache in API
+    this.on('threat:broadcast', ({ broadcast, txHash }) => {
+      if (this.threatAPIServer) {
+        this.threatAPIServer.addThreat(broadcast, txHash);
       }
     });
   }
@@ -192,6 +210,15 @@ export class ExecutorAgent extends EventEmitter {
 
     this.isRunning = true;
 
+    // Start Threat API server if enabled
+    if (this.config.threatAPI?.enabled) {
+      this.threatAPIServer = new ThreatAPIServer({
+        port: this.config.threatAPI.port,
+        retentionMs: this.config.threatAPI.retentionMs || 300000, // 5 minutes default
+      });
+      await this.threatAPIServer.start();
+    }
+
     // Monitor protection expirations
     this.monitorInterval = setInterval(() => {
       this.monitorProtections();
@@ -214,6 +241,11 @@ export class ExecutorAgent extends EventEmitter {
       this.monitorInterval = undefined;
     }
 
+    // Stop Threat API server
+    if (this.threatAPIServer) {
+      await this.threatAPIServer.stop();
+    }
+
     this.isRunning = false;
     console.log("✅ Executor: Stopped");
     this.emit("executor:stopped");
@@ -227,10 +259,8 @@ export class ExecutorAgent extends EventEmitter {
    * Execute a risk decision from the RiskEngine.
    * 
    * Flow:
-   *   1. Deactivate all existing protections for this pool
-   *   2. Activate the chosen protection based on decision.action
-   *   3. Store protection state for monitoring
-   *   4. Emit success/failure events
+   *   - ELEVATED tier: Broadcast to LP bots via on-chain event (no execution)
+   *   - CRITICAL tier: Execute on-chain protection
    */
   async executeDecision(decision: RiskDecision): Promise<void> {
     console.log(`🎯 Executor: Executing decision ${decision.id} for pool ${decision.targetPool}`);
@@ -238,6 +268,13 @@ export class ExecutorAgent extends EventEmitter {
     console.log(`   Rationale: ${decision.rationale}`);
 
     try {
+      // ELEVATED tier: Broadcast to LP bots (no on-chain execution)
+      if (decision.tier === 'ELEVATED') {
+        await this.broadcastThreatToLPs(decision);
+        return;
+      }
+
+      // CRITICAL tier: Execute on-chain protection
       const poolKey = `${decision.chain}:${decision.pair}`;
       const poolId = this.computePoolId(decision.targetPool);
 
@@ -352,6 +389,153 @@ export class ExecutorAgent extends EventEmitter {
 
     await tx.wait();
     return tx.hash;
+  }
+
+  // ---------------------------------------------------------------------------
+  // LP THREAT BROADCAST (ELEVATED TIER)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Broadcast ELEVATED tier threat to LP bots via on-chain event.
+   * Does NOT execute any on-chain protection - only emits event for LP consumption.
+   */
+  private async broadcastThreatToLPs(decision: RiskDecision): Promise<void> {
+    const chain = decision.chain as "ethereum" | "base" | "arbitrum";
+    const hookContract = this.hookContracts.get(chain)!;
+    const poolId = this.computePoolId(decision.targetPool);
+
+    console.log(`📡 Broadcasting ELEVATED threat to LP bots...`);
+    console.log(`   Pool: ${decision.targetPool}`);
+    console.log(`   Action: ${decision.action}, Score: ${decision.compositeScore.toFixed(1)}`);
+
+    // Extract signal types from contributing signals
+    const signalTypes = [...new Set(decision.contributingSignals.map(s => s.source))];
+
+    // Calculate expiry timestamp
+    const expiresAt = Math.floor((decision.timestamp + decision.ttlMs) / 1000);
+
+    // Truncate rationale if too long
+    const rationale = decision.rationale.slice(0, 256);
+
+    // Generate proof (TEE attestation in production)
+    const proof = this.generateProof(decision);
+
+    try {
+      // Call broadcastThreat on SentinelHook.sol
+      const tx = await hookContract.broadcastThreat(
+        poolId,
+        "ELEVATED",
+        decision.action,
+        Math.floor(decision.compositeScore),
+        expiresAt,
+        rationale,
+        signalTypes,
+        proof,
+        {
+          maxFeePerGas: this.getMaxGasPrice(chain),
+        }
+      );
+
+      await tx.wait();
+      console.log(`✅ Threat broadcast on-chain, tx: ${tx.hash}`);
+
+      // Emit local event for API server to cache
+      const broadcast: LPThreatBroadcast = {
+        id: decision.id,
+        tier: 'ELEVATED',
+        action: decision.action,
+        compositeScore: decision.compositeScore,
+        targetPool: decision.targetPool,
+        chain: decision.chain,
+        pair: decision.pair,
+        timestamp: decision.timestamp,
+        expiresAt: decision.timestamp + decision.ttlMs,
+        threatDetails: {
+          rationale: decision.rationale,
+          contributingSignals: decision.contributingSignals,
+          signalTypes,
+          correlationWindow: 24000,
+          recommendedAction: this.getRecommendedAction(decision),
+        },
+        riskMetrics: this.calculateRiskMetrics(decision),
+        suggestedActions: this.generateSuggestedActions(decision),
+      };
+
+      this.emit('threat:broadcast', { broadcast, txHash: tx.hash });
+    } catch (error) {
+      console.error(`❌ Failed to broadcast threat:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate recommended action text for LPs
+   */
+  private getRecommendedAction(decision: RiskDecision): string {
+    if (decision.compositeScore > 60) {
+      return "Consider reducing position size by 30-50%";
+    } else if (decision.compositeScore > 40) {
+      return "Monitor closely and consider pausing new positions";
+    } else {
+      return "Elevated risk detected - exercise caution";
+    }
+  }
+
+  /**
+   * Calculate risk metrics for LP decision-making
+   */
+  private calculateRiskMetrics(decision: RiskDecision): {
+    severity: number;
+    confidence: number;
+    urgency: 'LOW' | 'MEDIUM' | 'HIGH';
+  } {
+    const severity = decision.compositeScore;
+    
+    // Confidence based on number of contributing signals
+    const signalCount = decision.contributingSignals.length;
+    const confidence = Math.min(100, 50 + (signalCount * 10));
+
+    // Urgency based on score and signal diversity
+    let urgency: 'LOW' | 'MEDIUM' | 'HIGH';
+    if (severity > 60) {
+      urgency = 'HIGH';
+    } else if (severity > 40) {
+      urgency = 'MEDIUM';
+    } else {
+      urgency = 'LOW';
+    }
+
+    return { severity, confidence, urgency };
+  }
+
+  /**
+   * Generate suggested actions for LPs based on threat
+   */
+  private generateSuggestedActions(decision: RiskDecision): {
+    withdrawLiquidity?: boolean;
+    reduceLiquidity?: number;
+    pauseNewPositions?: boolean;
+    increaseSlippage?: number;
+  } {
+    const score = decision.compositeScore;
+    const actions: any = {};
+
+    if (score > 60) {
+      actions.reduceLiquidity = 50; // 50%
+      actions.pauseNewPositions = true;
+    } else if (score > 40) {
+      actions.reduceLiquidity = 30; // 30%
+      actions.pauseNewPositions = true;
+    } else {
+      actions.pauseNewPositions = true;
+    }
+
+    // Suggest increased slippage tolerance for MEV protection
+    if (decision.action === 'MEV_PROTECTION') {
+      actions.increaseSlippage = Math.floor(score / 10) * 5; // 5-50 bps
+    }
+
+    return actions;
   }
 
   // ---------------------------------------------------------------------------
