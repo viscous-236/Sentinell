@@ -179,7 +179,7 @@ export class ScoutAgent extends EventEmitter {
     this.config = config;
     this.providers = new Map();
     this.rpcBudget = config.rpcBudget;
-    
+
     // Initialize cluster tracker if enabled
     if (config.clusterDetection?.enabled) {
       this.clusterTracker = new TransactionClusterTracker({
@@ -187,7 +187,7 @@ export class ScoutAgent extends EventEmitter {
         threshold: config.clusterDetection.threshold ?? 3,
       });
     }
-    
+
     this.dataCache = {
       transactions: [],
       prices: [],
@@ -248,7 +248,7 @@ export class ScoutAgent extends EventEmitter {
     this.mempoolMonitor.on("transaction", (tx: MempoolTransaction) => {
       this.dataCache.transactions.push(tx);
       this.trimCache("transactions");
-      
+
       // Check for transaction cluster if enabled
       if (this.clusterTracker && tx.to) {
         const clusterSignal = this.clusterTracker.addTransaction(tx);
@@ -256,7 +256,7 @@ export class ScoutAgent extends EventEmitter {
           this.emit("signal", clusterSignal);
         }
       }
-      
+
       const signalType = this.classifyTransaction(tx);
       if (signalType) {
         const signal: ScoutSignal = {
@@ -393,7 +393,7 @@ export class ScoutAgent extends EventEmitter {
     if (this.mempoolMonitor) await this.mempoolMonitor.start();
     if (this.dexAggregator) await this.dexAggregator.start();
     if (this.flashLoanDetector) await this.flashLoanDetector.start();
-    //if (this.gasTracker) await this.gasTracker.start();
+    if (this.gasTracker) await this.gasTracker.start();
 
     console.log("Scout Agent is running");
   }
@@ -404,7 +404,7 @@ export class ScoutAgent extends EventEmitter {
     if (this.mempoolMonitor) await this.mempoolMonitor.stop();
     if (this.dexAggregator) await this.dexAggregator.stop();
     if (this.flashLoanDetector) await this.flashLoanDetector.stop();
-    //if (this.gasTracker) await this.gasTracker.stop();
+    if (this.gasTracker) await this.gasTracker.stop();
 
     console.log("Scout Agent stopped");
   }

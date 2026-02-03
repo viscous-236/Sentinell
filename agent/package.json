@@ -12,7 +12,13 @@
     "test:yellow:demo": "ts-node src/shared/yellow/test-yellow-demo.ts",
     "test:yellow:communication": "ts-node src/test-yellow-communication.ts",
     "test:yellow:simulation": "ts-node src/test-yellow-simulation.ts",
-    "test:full": "ts-node src/test-full-integration.ts"
+    "test:full": "ts-node src/test-full-integration.ts",
+    "test:e2e:scout": "ts-node tests/e2e/scout/scout.e2e.test.ts",
+    "test:e2e:validator": "ts-node tests/e2e/validator/validator.e2e.test.ts",
+    "test:e2e:executor": "ts-node tests/e2e/executor/executor.e2e.test.ts",
+    "test:e2e:integration": "ts-node tests/e2e/integration/full-flow.e2e.test.ts",
+    "test:e2e:simulation": "ts-node tests/e2e/simulation/threat-simulation.e2e.test.ts",
+    "test:e2e:all": "npm run test:e2e:scout && npm run test:e2e:validator && npm run test:e2e:executor && npm run test:e2e:integration"
   },
   "dependencies": {
     "@erc7824/nitrolite": "^0.5.3",
