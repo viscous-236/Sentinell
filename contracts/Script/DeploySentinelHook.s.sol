@@ -138,7 +138,7 @@ contract DeploySentinelHook is Script {
         console.log("========================================");
         console.log("");
         
-        address ethSepoliaAddress = predict DeterministicAddressForChain(ETHEREUM_SEPOLIA_POOL_MANAGER);
+        address ethSepoliaAddress = predictDeterministicAddressForChain(ETHEREUM_SEPOLIA_POOL_MANAGER);
         address baseSepoliaAddress = predictDeterministicAddressForChain(BASE_SEPOLIA_POOL_MANAGER);
         address arbSepoliaAddress = predictDeterministicAddressForChain(ARBITRUM_SEPOLIA_POOL_MANAGER);
         

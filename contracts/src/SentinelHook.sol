@@ -11,11 +11,13 @@ import {
     BeforeSwapDelta,
     BeforeSwapDeltaLibrary
 } from "v4-core/src/types/BeforeSwapDelta.sol";
-import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
+import {
+    Ownable2Step
+} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {AggregatorV3Interface} from "./Interfaces/AggregatorV3Interface.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
-contract SentinelHook is IHooks, Ownable {
+contract SentinelHook is IHooks, Ownable2Step {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
@@ -134,9 +136,9 @@ contract SentinelHook is IHooks, Ownable {
     // LP Threat Broadcast Event (for ELEVATED tier threats)
     event ThreatBroadcast(
         PoolId indexed poolId,
-        string tier,              // "ELEVATED"
-        string action,            // "MEV_PROTECTION", "ORACLE_VALIDATION", etc.
-        uint256 compositeScore,   // 0-100
+        string tier, // "ELEVATED"
+        string action, // "MEV_PROTECTION", "ORACLE_VALIDATION", etc.
+        uint256 compositeScore, // 0-100
         uint256 timestamp,
         uint256 expiresAt,
         string rationale,
@@ -162,11 +164,12 @@ contract SentinelHook is IHooks, Ownable {
     constructor(
         IPoolManager _poolManager,
         uint24 _baseFee
-    ) Ownable(msg.sender) {
+    ) {
         if (_baseFee > MAX_FEE) revert InvalidFee();
 
         poolManager = _poolManager;
         baseFee = _baseFee;
+        _transferOwnership(msg.sender);
     }
 
     function getHookPermissions()
@@ -196,7 +199,7 @@ contract SentinelHook is IHooks, Ownable {
     function beforeSwap(
         address sender,
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata ,
+        IPoolManager.SwapParams calldata,
         bytes calldata
     ) external onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
         if (paused) revert Paused();
@@ -693,8 +696,6 @@ contract SentinelHook is IHooks, Ownable {
         }
         return baseFee;
     }
-
-
 
     /*//////////////////////////////////////////////////////////////
                          INTERNAL HELPERS
