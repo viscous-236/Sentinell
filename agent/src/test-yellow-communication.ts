@@ -137,8 +137,8 @@ async function runYellowCommunicationTest() {
             enabled: true,
             updateInterval: 30000,
             pairs: [
+                // Only WETH/USDC across all chains (rate limit optimized)
                 { token0: 'WETH', token1: 'USDC', dex: 'uniswap', chain: 'ethereum' },
-                { token0: 'WETH', token1: 'USDT', dex: 'sushiswap', chain: 'ethereum' },
                 { token0: 'WETH', token1: 'USDC', dex: 'uniswap', chain: 'base' },
                 { token0: 'WETH', token1: 'USDC', dex: 'uniswap', chain: 'arbitrum' },
             ],

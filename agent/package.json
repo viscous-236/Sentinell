@@ -18,6 +18,9 @@
     "test:e2e:executor": "ts-node tests/e2e/executor/executor.e2e.test.ts",
     "test:e2e:integration": "ts-node tests/e2e/integration/full-flow.e2e.test.ts",
     "test:e2e:simulation": "ts-node tests/e2e/simulation/threat-simulation.e2e.test.ts",
+    "test:e2e:onchain": "ts-node tests/e2e/integration/real-onchain-integration.e2e.test.ts",
+    "test:e2e:yellow-oracle": "ts-node tests/e2e/yellow-oracle-e2e.test.ts",
+    "test:e2e:attack": "ts-node tests/e2e/real-attack-simulation.e2e.test.ts",
     "test:e2e:all": "npm run test:e2e:scout && npm run test:e2e:validator && npm run test:e2e:executor && npm run test:e2e:integration"
   },
   "dependencies": {

@@ -11,11 +11,35 @@ import {
     BeforeSwapDelta,
     BeforeSwapDeltaLibrary
 } from "v4-core/src/types/BeforeSwapDelta.sol";
+import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 import {
     Ownable2Step
 } from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {AggregatorV3Interface} from "./Interfaces/AggregatorV3Interface.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
+
+/**
+ * @notice Interface for YellowOracle - Yellow Network authorization oracle
+ * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+ */
+interface IYellowOracle {
+    function getAuthorization(
+        bytes32 poolId
+    )
+        external
+        view
+        returns (bool hasAuth, uint24 fee, uint256 expiryBlock, address signer);
+
+    function verifyInstantAuthorization(
+        bytes32 poolId,
+        uint8 action,
+        uint24 fee,
+        uint256 expiryBlock,
+        uint256 timestamp,
+        uint256 nonce,
+        bytes calldata signature
+    ) external view returns (bool valid, address signer);
+}
 
 contract SentinelHook is IHooks, Ownable2Step {
     using PoolIdLibrary for PoolKey;
@@ -67,6 +91,10 @@ contract SentinelHook is IHooks, Ownable2Step {
     address public agentRegistry;
     uint24 public baseFee;
     bool public paused;
+
+    // Yellow Network Oracle - for off-chain pre-authorization checking
+    // Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+    IYellowOracle public yellowOracle;
 
     // Per-pool configurations
     mapping(PoolId => ProtectionConfig) public configs;
@@ -145,6 +173,15 @@ contract SentinelHook is IHooks, Ownable2Step {
         string[] signalTypes
     );
 
+    // Yellow Network Events
+    event YellowOracleUpdated(address indexed newOracle);
+    event YellowProtectionApplied(
+        PoolId indexed poolId,
+        uint24 fee,
+        address indexed signer,
+        uint256 expiryBlock
+    );
+
     error Unauthorized();
     error InvalidFee();
     error ProtectionAlreadyActive();
@@ -163,13 +200,13 @@ contract SentinelHook is IHooks, Ownable2Step {
 
     constructor(
         IPoolManager _poolManager,
-        uint24 _baseFee
-    ) {
+        uint24 _baseFee,
+        address initialOwner
+    ) Ownable(initialOwner) {
         if (_baseFee > MAX_FEE) revert InvalidFee();
 
         poolManager = _poolManager;
         baseFee = _baseFee;
-        _transferOwnership(msg.sender);
     }
 
     function getHookPermissions()
@@ -200,11 +237,89 @@ contract SentinelHook is IHooks, Ownable2Step {
         address sender,
         PoolKey calldata key,
         IPoolManager.SwapParams calldata,
-        bytes calldata
+        bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
         if (paused) revert Paused();
 
         PoolId poolId = key.toId();
+        bytes32 poolIdBytes = bytes32(PoolId.unwrap(poolId));
+
+        // =========================================================================
+        // YELLOW PRE-AUTHORIZATION CHECK (FIRST!)
+        // Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+        //
+        // This is the KEY to preventing MEV timing attacks:
+        // 1. Executor signs authorization OFF-CHAIN
+        // 2. Broadcasts via Yellow state channel (INSTANT, <50ms)
+        // 3. Swap tx includes signature in hookData
+        // 4. We verify signature ON-THE-FLY (no on-chain tx needed!)
+        // 5. Protection is INSTANT vs ~12s for on-chain tx
+        // =========================================================================
+
+        if (address(yellowOracle) != address(0)) {
+            // PRIORITY 1: Try instant verification from hookData signature
+            if (hookData.length >= 165) {
+                // Minimum: action(1) + fee(3) + expiry(32) + timestamp(32) + nonce(32) + sig(65)
+                (
+                    bool instantValid,
+                    uint24 instantFee,
+                    uint256 instantExpiry,
+                    address instantSigner
+                ) = _tryInstantVerification(poolIdBytes, hookData);
+
+                if (instantValid) {
+                    emit YellowProtectionApplied(
+                        poolId,
+                        instantFee,
+                        instantSigner,
+                        instantExpiry
+                    );
+
+                    // If fee is 0, it means circuit breaker (reject swap)
+                    if (instantFee == 0) {
+                        revert PoolPaused(); // Circuit breaker via Yellow
+                    }
+
+                    return (
+                        IHooks.beforeSwap.selector,
+                        BeforeSwapDeltaLibrary.ZERO_DELTA,
+                        instantFee
+                    );
+                }
+            }
+
+            // PRIORITY 2: Fallback to stored authorization (from settlement)
+            (
+                bool hasYellowAuth,
+                uint24 yellowFee,
+                uint256 yellowExpiry,
+                address signer
+            ) = yellowOracle.getAuthorization(poolIdBytes);
+
+            if (hasYellowAuth && block.number <= yellowExpiry) {
+                emit YellowProtectionApplied(
+                    poolId,
+                    yellowFee,
+                    signer,
+                    yellowExpiry
+                );
+
+                if (yellowFee == 0) {
+                    revert PoolPaused();
+                }
+
+                return (
+                    IHooks.beforeSwap.selector,
+                    BeforeSwapDeltaLibrary.ZERO_DELTA,
+                    yellowFee
+                );
+            }
+        }
+
+        // =========================================================================
+        // FALLBACK: On-chain protection checks
+        // =========================================================================
+
         ProtectionConfig memory config = configs[poolId];
 
         if (config.circuitBreakerEnabled) {
@@ -323,6 +438,74 @@ contract SentinelHook is IHooks, Ownable2Step {
         bytes calldata
     ) external pure returns (bytes4) {
         return IHooks.afterDonate.selector;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           YELLOW INSTANT VERIFICATION
+    //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Decode hookData and verify off-chain signature for INSTANT protection
+     *
+     * hookData format (ABI-encoded):
+     *   - action: uint8 (1=MEV, 2=Oracle, 3=CircuitBreaker)
+     *   - fee: uint24 (dynamic fee in bps)
+     *   - expiryBlock: uint256
+     *   - timestamp: uint256
+     *   - nonce: uint256
+     *   - signature: bytes (65 bytes)
+     *
+     * @param poolIdBytes Pool identifier
+     * @param hookData Encoded authorization + signature from Executor
+     * @return valid Whether verification succeeded
+     * @return fee Dynamic fee to apply
+     * @return expiryBlock Block when authorization expires
+     * @return signer Executor who signed
+     */
+    function _tryInstantVerification(
+        bytes32 poolIdBytes,
+        bytes calldata hookData
+    )
+        internal
+        view
+        returns (bool valid, uint24 fee, uint256 expiryBlock, address signer)
+    {
+        // Decode hookData
+        (
+            uint8 action,
+            uint24 decodedFee,
+            uint256 decodedExpiry,
+            uint256 timestamp,
+            uint256 nonce,
+            bytes memory signature
+        ) = abi.decode(
+                hookData,
+                (uint8, uint24, uint256, uint256, uint256, bytes)
+            );
+
+        // Call YellowOracle to verify signature
+        (bool isValid, address recoveredSigner) = yellowOracle
+            .verifyInstantAuthorization(
+                poolIdBytes,
+                action,
+                decodedFee,
+                decodedExpiry,
+                timestamp,
+                nonce,
+                signature
+            );
+
+        if (!isValid) {
+            return (false, 0, 0, address(0));
+        }
+
+        // Map action to fee (action=3 CircuitBreaker uses fee=0 to trigger revert)
+        uint24 effectiveFee = decodedFee;
+        if (action == 3) {
+            effectiveFee = 0; // Circuit breaker
+        }
+
+        return (true, effectiveFee, decodedExpiry, recoveredSigner);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -671,6 +854,17 @@ contract SentinelHook is IHooks, Ownable2Step {
 
     function emergencyPause(bool _paused) external onlyOwner {
         paused = _paused;
+    }
+
+    /**
+     * @notice Set the Yellow Oracle for off-chain pre-authorization checking
+     * @param _yellowOracle Address of the deployed YellowOracle contract
+     *
+     * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+     */
+    function setYellowOracle(address _yellowOracle) external onlyOwner {
+        yellowOracle = IYellowOracle(_yellowOracle);
+        emit YellowOracleUpdated(_yellowOracle);
     }
 
     /*//////////////////////////////////////////////////////////////

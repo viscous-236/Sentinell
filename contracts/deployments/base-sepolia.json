@@ -1,0 +1,8 @@
+{
+  "network": "base-sepolia",
+  "chainId": "84532",
+  "sentinelHook": "0x882091F07DCaDC6F2Cc1F1ceDE7BbD1ECB333c82",
+  "poolManager": "0x7Da1D65F8B249183667cdE74C5CBD46dD38AA829",
+  "baseFee": "3000",
+  "deployer": "0xC25dA7A84643E29819e93F4Cb4442e49604662f1"
+}

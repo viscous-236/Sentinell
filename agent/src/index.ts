@@ -189,20 +189,28 @@ function loadConfig() {
   // Executor config (per PROJECT_SPEC.md Section 4.1 - Executor Agent)
   const executor: ExecutorConfig = {
     rpcUrls: {
-      ethereum: process.env.ETHEREUM_RPC_URL || rpcUrl,
-      base: process.env.BASE_RPC_URL || "https://mainnet.base.org",
-      arbitrum: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+      ethereum: process.env.ETHEREUM_SEPOLIA_RPC || process.env.ETHEREUM_RPC_URL || rpcUrl,
+      base: process.env.BASE_SEPOLIA_RPC || process.env.BASE_RPC_URL || "https://mainnet.base.org",
+      arbitrum: process.env.ARBITRUM_SEPOLIA_RPC || process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
     },
     hookAddresses: {
       ethereum:
+        process.env.SENTINEL_HOOK_ETHEREUM_SEPOLIA ||
         process.env.HOOK_ADDRESS_ETHEREUM ||
         "0x0000000000000000000000000000000000000001",
       base:
+        process.env.SENTINEL_HOOK_BASE_SEPOLIA ||
         process.env.HOOK_ADDRESS_BASE ||
         "0x0000000000000000000000000000000000000001",
       arbitrum:
+        process.env.SENTINEL_HOOK_ARBITRUM_SEPOLIA ||
         process.env.HOOK_ADDRESS_ARBITRUM ||
         "0x0000000000000000000000000000000000000001",
+    },
+    yellowOracleAddresses: {
+      ethereum: process.env.YELLOW_ORACLE_ETHEREUM_SEPOLIA || "0x0000000000000000000000000000000000000001",
+      base: process.env.YELLOW_ORACLE_BASE_SEPOLIA || "0x0000000000000000000000000000000000000001",
+      arbitrum: process.env.YELLOW_ORACLE_ARBITRUM_SEPOLIA || "0x0000000000000000000000000000000000000001",
     },
     agentPrivateKey: privateKey,
     teeEnabled: process.env.TEE_ENABLED === "true",
@@ -326,7 +334,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", gracefulShutdown);
 
   // Keep process alive
-  await new Promise(() => {});
+  await new Promise(() => { });
 }
 
 /**

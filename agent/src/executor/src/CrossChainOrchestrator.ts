@@ -16,6 +16,7 @@ import type { Route, RoutesRequest, RouteOptions } from "@lifi/sdk";
 import {
   ACTIVE_CHAIN_IDS,
   CHAIN_CONFIGS,
+  MAINNET_TOKENS,
   TESTNET_TOKENS,
   CROSS_CHAIN_ROUTES,
   DEFENSE_STRATEGY_CONFIGS,
@@ -388,8 +389,8 @@ export class CrossChainOrchestrator extends EventEmitter {
       return SAFE_HAVEN_CONFIG.chainId;
     }
 
-    // Otherwise, pick alternative (Base Sepolia as secondary safe haven)
-    return ACTIVE_CHAIN_IDS.baseSepolia;
+    // Otherwise, pick alternative (Base as secondary safe haven)
+    return ACTIVE_CHAIN_IDS.base;
   }
 
   /**
@@ -426,7 +427,8 @@ export class CrossChainOrchestrator extends EventEmitter {
     const chainKey = Object.entries(ACTIVE_CHAIN_IDS).find(([, id]) => id === chainId)?.[0];
     if (!chainKey) return null;
 
-    const tokens = TESTNET_TOKENS[chainKey as keyof typeof TESTNET_TOKENS];
+    // Use mainnet tokens for LI.FI routing (mainnet chain IDs)
+    const tokens = MAINNET_TOKENS[chainKey as keyof typeof MAINNET_TOKENS];
     if (!tokens) return null;
 
     return (tokens as Record<string, string>)[tokenSymbol] || null;

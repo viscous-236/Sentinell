@@ -23,8 +23,7 @@ fi
 deploy_to_chain() {
     local CHAIN_NAME=$1
     local RPC_URL=$2
-    local VERIFIER=$3
-    local API_KEY=$4
+    local API_KEY=$3
     
     echo "========================================="
     echo "  Deploying to $CHAIN_NAME"
@@ -36,8 +35,6 @@ deploy_to_chain() {
         --rpc-url $RPC_URL \
         --broadcast \
         --verify \
-        --verifier $VERIFIER \
-        --verifier-url https://api-$VERIFIER.com/api \
         --etherscan-api-key $API_KEY \
         -vvv
     
@@ -48,17 +45,17 @@ deploy_to_chain() {
 
 # Deploy to Ethereum Sepolia
 echo "Step 1/3: Ethereum Sepolia"
-deploy_to_chain "Ethereum Sepolia" "$ETHEREUM_SEPOLIA_RPC" "etherscan" "$ETHERSCAN_API_KEY"
+deploy_to_chain "Ethereum Sepolia" "$ETHEREUM_SEPOLIA_RPC" "$ETHERSCAN_API_KEY"
 sleep 5
 
 # Deploy to Base Sepolia
 echo "Step 2/3: Base Sepolia"
-deploy_to_chain "Base Sepolia" "$BASE_SEPOLIA_RPC" "basescan" "$BASESCAN_API_KEY"
+deploy_to_chain "Base Sepolia" "$BASE_SEPOLIA_RPC" "$BASESCAN_API_KEY"
 sleep 5
 
 # Deploy to Arbitrum Sepolia
 echo "Step 3/3: Arbitrum Sepolia"
-deploy_to_chain "Arbitrum Sepolia" "$ARBITRUM_SEPOLIA_RPC" "arbiscan" "$ARBISCAN_API_KEY"
+deploy_to_chain "Arbitrum Sepolia" "$ARBITRUM_SEPOLIA_RPC" "$ARBISCAN_API_KEY"
 
 echo ""
 echo "========================================="

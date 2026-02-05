@@ -1,23 +1,3 @@
-/**
- * Cross-Chain Configuration for Sentinell Protection Layer
- * 
- * Testnet configuration for development:
- * - Ethereum Sepolia (11155111)
- * - Base Sepolia (84532)
- * - Arbitrum Sepolia (421614)
- */
-
-// =============================================================================
-// CHAIN IDS - TESTNETS
-// =============================================================================
-
-export const TESTNET_CHAIN_IDS = {
-  ethereumSepolia: 11155111,
-  baseSepolia: 84532,
-  arbitrumSepolia: 421614,
-} as const;
-
-// Mainnet chain IDs (for production)
 export const MAINNET_CHAIN_IDS = {
   ethereum: 1,
   base: 8453,
@@ -26,12 +6,20 @@ export const MAINNET_CHAIN_IDS = {
   optimism: 10,
 } as const;
 
-// Active chain IDs (switch between testnet/mainnet)
-export const ACTIVE_CHAIN_IDS = TESTNET_CHAIN_IDS;
+export const TESTNET_CHAIN_IDS = {
+  ethereumSepolia: 11155111,
+  baseSepolia: 84532,
+  arbitrumSepolia: 421614,
+} as const;
 
-// =============================================================================
-// CHAIN CONFIGURATIONS
-// =============================================================================
+// LI.FI uses MAINNET chains for routing
+export const LIFI_CHAIN_IDS = MAINNET_CHAIN_IDS;
+
+// Hook activation uses SEPOLIA chains
+export const HOOK_CHAIN_IDS = TESTNET_CHAIN_IDS;
+
+// Default active chains (for backwards compatibility)
+export const ACTIVE_CHAIN_IDS = MAINNET_CHAIN_IDS;
 
 export interface ChainConfig {
   id: number;
@@ -44,6 +32,34 @@ export interface ChainConfig {
 }
 
 export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
+  ethereum: {
+    id: 1,
+    name: "Ethereum Mainnet",
+    rpcUrl: process.env.ETHEREUM_RPC_URL || "https://eth.llamarpc.com",
+    nativeCurrency: "ETH",
+    blockExplorer: "https://etherscan.io",
+    isTestnet: false,
+    avgBlockTime: 12,
+  },
+  base: {
+    id: 8453,
+    name: "Base",
+    rpcUrl: process.env.BASE_RPC_URL || "https://mainnet.base.org",
+    nativeCurrency: "ETH",
+    blockExplorer: "https://basescan.org",
+    isTestnet: false,
+    avgBlockTime: 2,
+  },
+  arbitrum: {
+    id: 42161,
+    name: "Arbitrum One",
+    rpcUrl: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+    nativeCurrency: "ETH",
+    blockExplorer: "https://arbiscan.io",
+    isTestnet: false,
+    avgBlockTime: 0.25,
+  },
+
   ethereumSepolia: {
     id: 11155111,
     name: "Ethereum Sepolia",
@@ -73,10 +89,29 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
   },
 };
 
-// =============================================================================
-// TESTNET TOKEN ADDRESSES
-// =============================================================================
 
+export const MAINNET_TOKENS = {
+  ethereum: {
+    ETH: "0x0000000000000000000000000000000000000000",
+    WETH: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    USDC: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // Native USDC
+    USDT: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    DAI: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+  },
+  base: {
+    ETH: "0x0000000000000000000000000000000000000000",
+    WETH: "0x4200000000000000000000000000000000000006",
+    USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Native USDC
+    USDbC: "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA", // Bridged USDC
+  },
+  arbitrum: {
+    ETH: "0x0000000000000000000000000000000000000000",
+    WETH: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    USDC: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // Native USDC
+    "USDC.e": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8", // Bridged USDC
+    USDT: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+  },
+} as const;
 export const TESTNET_TOKENS = {
   ethereumSepolia: {
     ETH: "0x0000000000000000000000000000000000000000",
@@ -111,56 +146,56 @@ export interface CrossChainRoute {
 }
 
 /**
- * Testnet cross-chain routes via LI.FI
- * Note: Not all routes may be available on testnets
+ * MAINNET cross-chain routes via LI.FI
+ * These routes use real bridges and DEXs on mainnet
  */
 export const CROSS_CHAIN_ROUTES: CrossChainRoute[] = [
-  // Ethereum Sepolia → Base Sepolia
+  // Ethereum → Base (most liquid route)
   {
-    fromChainId: TESTNET_CHAIN_IDS.ethereumSepolia,
-    toChainId: TESTNET_CHAIN_IDS.baseSepolia,
-    supportedTokens: ["ETH", "USDC"],
-    estimatedTime: 900, // ~15 min
+    fromChainId: MAINNET_CHAIN_IDS.ethereum,
+    toChainId: MAINNET_CHAIN_IDS.base,
+    supportedTokens: ["ETH", "USDC", "USDT"],
+    estimatedTime: 600, // ~10 min via official bridge
     priority: 1,
   },
-  // Ethereum Sepolia → Arbitrum Sepolia
+  // Ethereum → Arbitrum
   {
-    fromChainId: TESTNET_CHAIN_IDS.ethereumSepolia,
-    toChainId: TESTNET_CHAIN_IDS.arbitrumSepolia,
-    supportedTokens: ["ETH", "USDC"],
-    estimatedTime: 600, // ~10 min
+    fromChainId: MAINNET_CHAIN_IDS.ethereum,
+    toChainId: MAINNET_CHAIN_IDS.arbitrum,
+    supportedTokens: ["ETH", "USDC", "USDT"],
+    estimatedTime: 900, // ~15 min via Arbitrum bridge
     priority: 1,
   },
-  // Base Sepolia → Ethereum Sepolia
+  // Base → Ethereum
   {
-    fromChainId: TESTNET_CHAIN_IDS.baseSepolia,
-    toChainId: TESTNET_CHAIN_IDS.ethereumSepolia,
+    fromChainId: MAINNET_CHAIN_IDS.base,
+    toChainId: MAINNET_CHAIN_IDS.ethereum,
     supportedTokens: ["ETH", "USDC"],
-    estimatedTime: 900,
+    estimatedTime: 900, // ~15 min (7-day challenge on official bridge, but fast via third-party)
     priority: 2,
   },
-  // Base Sepolia → Arbitrum Sepolia
+  // Base → Arbitrum (via Ethereum or direct bridges)
   {
-    fromChainId: TESTNET_CHAIN_IDS.baseSepolia,
-    toChainId: TESTNET_CHAIN_IDS.arbitrumSepolia,
-    supportedTokens: ["ETH"],
-    estimatedTime: 1200,
-    priority: 3,
-  },
-  // Arbitrum Sepolia → Ethereum Sepolia
-  {
-    fromChainId: TESTNET_CHAIN_IDS.arbitrumSepolia,
-    toChainId: TESTNET_CHAIN_IDS.ethereumSepolia,
+    fromChainId: MAINNET_CHAIN_IDS.base,
+    toChainId: MAINNET_CHAIN_IDS.arbitrum,
     supportedTokens: ["ETH", "USDC"],
-    estimatedTime: 900,
+    estimatedTime: 1200, // ~20 min
     priority: 2,
   },
-  // Arbitrum Sepolia → Base Sepolia
+  // Arbitrum → Ethereum
   {
-    fromChainId: TESTNET_CHAIN_IDS.arbitrumSepolia,
-    toChainId: TESTNET_CHAIN_IDS.baseSepolia,
-    supportedTokens: ["ETH"],
-    estimatedTime: 1200,
+    fromChainId: MAINNET_CHAIN_IDS.arbitrum,
+    toChainId: MAINNET_CHAIN_IDS.ethereum,
+    supportedTokens: ["ETH", "USDC", "USDT"],
+    estimatedTime: 900, // ~15 min (7-day challenge on official bridge, but fast via third-party)
+    priority: 2,
+  },
+  // Arbitrum → Base
+  {
+    fromChainId: MAINNET_CHAIN_IDS.arbitrum,
+    toChainId: MAINNET_CHAIN_IDS.base,
+    supportedTokens: ["ETH", "USDC"],
+    estimatedTime: 1200, // ~20 min
     priority: 3,
   },
 ];
@@ -247,11 +282,8 @@ export const CROSS_CHAIN_THREAT_THRESHOLDS = {
 
 export const LIFI_CONFIG = {
   integrator: "Sentinell",
-  /** LI.FI API endpoint */
   apiUrl: "https://li.quest/v1",
-  /** Supported chain IDs */
-  chains: Object.values(TESTNET_CHAIN_IDS),
-  /** Default route options */
+  chains: Object.values(MAINNET_CHAIN_IDS),
   defaultRouteOptions: {
     slippage: 0.01, // 1%
     allowSwitchChain: true,
@@ -265,8 +297,13 @@ export const LIFI_CONFIG = {
 };
 
 export default {
+  MAINNET_CHAIN_IDS,
+  TESTNET_CHAIN_IDS,
+  LIFI_CHAIN_IDS,
+  HOOK_CHAIN_IDS,
   ACTIVE_CHAIN_IDS,
   CHAIN_CONFIGS,
+  MAINNET_TOKENS,
   TESTNET_TOKENS,
   CROSS_CHAIN_ROUTES,
   DEFENSE_STRATEGY_CONFIGS,

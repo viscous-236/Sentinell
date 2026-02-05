@@ -36,7 +36,7 @@ contract DeploySentinelHook is Script {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev CREATE2 salt — keep constant across deployments
-    bytes32 public constant SALT = keccak256("SENTINEL_HOOK_V3");
+    bytes32 public constant SALT = keccak256("SENTINELV04");
 
     /// @dev Base swap fee (0.3% expressed in Uniswap v4 fee units)
     uint24 public constant BASE_FEE = 3000;
@@ -84,7 +84,8 @@ contract DeploySentinelHook is Script {
 
         SentinelHook hook = new SentinelHook{salt: SALT}(
             IPoolManager(poolManager),
-            BASE_FEE
+            BASE_FEE,
+            deployer // Set deployer EOA as the initial owner
         );
 
         vm.stopBroadcast();
@@ -133,7 +134,7 @@ contract DeploySentinelHook is Script {
 
         bytes memory creationCode = abi.encodePacked(
             type(SentinelHook).creationCode,
-            abi.encode(IPoolManager(poolManager), BASE_FEE)
+            abi.encode(IPoolManager(poolManager), BASE_FEE, deployer)
         );
 
         bytes32 hash = keccak256(

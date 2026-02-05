@@ -25,7 +25,7 @@ import { NitroliteClient } from './nitrolite-client';
 import { YellowConfig, SessionId, ProtectionAction } from './types';
 
 // Message types for inter-agent communication
-export type MessageType = 'SCOUT_SIGNAL' | 'SCOUT_PRICE' | 'VALIDATOR_ALERT' | 'RISK_DECISION' | 'EXECUTOR_RESULT';
+export type MessageType = 'SCOUT_SIGNAL' | 'SCOUT_PRICE' | 'VALIDATOR_ALERT' | 'RISK_DECISION' | 'EXECUTOR_RESULT' | 'PROTECTION_AUTH';
 
 export interface YellowMessage {
     id: string;
@@ -100,6 +100,38 @@ export interface ExecutorResultMessage extends YellowMessage {
     };
 }
 
+/**
+ * Yellow Protection Authorization
+ * 
+ * This is the KEY to preventing MEV timing attacks:
+ * - Executor signs authorization OFF-CHAIN
+ * - Broadcast via Yellow (no mempool exposure)
+ * - Hook checks this signature BEFORE allowing swaps
+ * - Protection is INSTANT (<50ms) vs on-chain (~12s)
+ * 
+ * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+ */
+export interface YellowProtectionAuth {
+    poolId: string;           // bytes32 hex string
+    action: 'MEV_PROTECTION' | 'ORACLE_VALIDATION' | 'CIRCUIT_BREAKER';
+    fee: number;              // Dynamic fee in basis points (0-50000)
+    expiryBlock: number;      // Block number when authorization expires
+    timestamp: number;        // Unix timestamp of signature
+    nonce: number;            // Unique nonce to prevent replay
+    chain: string;            // ethereum | base | arbitrum
+    signature: string;        // EIP-712 signature from Executor
+    signer: string;           // Executor address that signed
+}
+
+export interface ProtectionAuthMessage extends YellowMessage {
+    type: 'PROTECTION_AUTH';
+    payload: {
+        auth: YellowProtectionAuth;
+        decisionId: string;    // Reference to RiskDecision that triggered this
+        poolKey: string;       // Human readable pool identifier
+    };
+}
+
 // Yellow Session State structure (shared between agents)
 export interface YellowSessionState {
     sessionId: string;
@@ -112,12 +144,14 @@ export interface YellowSessionState {
     alerts: ValidatorAlertMessage[];
     decisions: RiskDecisionMessage[];
     executions: ExecutorResultMessage[];
+    protectionAuths: ProtectionAuthMessage[];  // NEW: Protection authorizations for hooks
 
     // Cursors for each agent (track what they've processed)
     cursors: {
         riskEngine: { signals: number; alerts: number };
         validator: { prices: number };  // Validator price cursor
         executor: { decisions: number };
+        hooks: { protectionAuths: number };  // NEW: Hook authorization cursor
     };
 
     // Micro-fee tracking
@@ -166,10 +200,12 @@ export class YellowMessageBus extends EventEmitter {
             alerts: [],
             decisions: [],
             executions: [],
+            protectionAuths: [],  // NEW: Protection authorizations
             cursors: {
                 riskEngine: { signals: 0, alerts: 0 },
                 validator: { prices: 0 },  // Validator price cursor
                 executor: { decisions: 0 },
+                hooks: { protectionAuths: 0 },  // NEW: Hooks cursor
             },
             microFees: {
                 feePerAction: MICRO_FEE_PER_ACTION,
@@ -473,6 +509,83 @@ export class YellowMessageBus extends EventEmitter {
         console.log(`⚡ [Yellow] Execution result published: ${result.hookType} (success: ${result.success})`);
     }
 
+    /**
+     * Publish Protection Authorization via Yellow state channel (OFF-CHAIN)
+     * 
+     * THIS IS THE KEY TO PREVENTING MEV TIMING ATTACKS:
+     * - Executor signs authorization OFF-CHAIN (no mempool exposure)
+     * - Broadcast via Yellow (<50ms latency)
+     * - Hook checks this signature BEFORE allowing swaps
+     * - Protection is INSTANT vs ~12s for on-chain tx
+     * 
+     * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+     * 
+     * @param auth - The signed protection authorization
+     * @param decisionId - Reference to RiskDecision that triggered this
+     * @param poolKey - Human readable pool identifier
+     */
+    async publishProtectionAuth(auth: YellowProtectionAuth, decisionId: string, poolKey: string): Promise<void> {
+        if (!this.sessionActive) {
+            throw new Error('No active session');
+        }
+
+        const message: ProtectionAuthMessage = {
+            id: `auth-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+            type: 'PROTECTION_AUTH',
+            timestamp: Date.now(),
+            sender: 'executor',
+            version: ++this.stateVersion,
+            payload: {
+                auth,
+                decisionId,
+                poolKey,
+            },
+        };
+
+        // Add to local state
+        this.state.protectionAuths.push(message);
+        this.state.version = this.stateVersion;
+        this.state.lastUpdate = Date.now();
+        this.updateMicroFees();
+
+        // Sync to Yellow session (OFF-CHAIN, instant)
+        await this.syncStateToYellow(message);
+
+        console.log(`🔐 [Yellow] Protection authorization published (OFF-CHAIN, INSTANT)`);
+        console.log(`   Pool: ${poolKey}`);
+        console.log(`   Action: ${auth.action}`);
+        console.log(`   Fee: ${auth.fee} bps`);
+        console.log(`   Expiry block: ${auth.expiryBlock}`);
+        console.log(`   Signature: ${auth.signature.slice(0, 20)}...`);
+        console.log(`   ✅ NO mempool exposure - protection active immediately!`);
+    }
+
+    /**
+     * Get active protection authorization for a pool
+     * 
+     * Used by: Hook relay/oracle to check if protection is active
+     * Returns the most recent non-expired authorization for the pool
+     */
+    getActiveProtectionAuth(poolId: string, currentBlock: number): YellowProtectionAuth | null {
+        const auths = this.state.protectionAuths
+            .filter(msg =>
+                msg.payload.auth.poolId === poolId &&
+                msg.payload.auth.expiryBlock > currentBlock
+            )
+            .sort((a, b) => b.timestamp - a.timestamp);
+
+        return auths.length > 0 ? auths[0].payload.auth : null;
+    }
+
+    /**
+     * Get all pending protection authorizations (for batch settlement)
+     * 
+     * Used by: Executor to batch commit authorizations on-chain
+     */
+    getPendingProtectionAuths(): ProtectionAuthMessage[] {
+        return [...this.state.protectionAuths];
+    }
+
     // =========================================================================
     // SUBSCRIBE METHODS - Agents read messages from Yellow session state
     // =========================================================================
@@ -599,6 +712,38 @@ export class YellowMessageBus extends EventEmitter {
         poll();
 
         console.log('🔔 [Yellow] Subscribed to Risk decisions');
+    }
+
+    /**
+     * Subscribe to protection authorizations from Yellow session state
+     * 
+     * Used by: Hook relay/oracle to receive real-time protection updates
+     * This enables instant protection activation without mempool exposure
+     * 
+     * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+     */
+    subscribeToProtectionAuths(callback: (auths: ProtectionAuthMessage[]) => void): void {
+        const pollKey = 'protectionAuths';
+
+        if (this.pollIntervals.has(pollKey)) {
+            clearInterval(this.pollIntervals.get(pollKey)!);
+        }
+
+        const poll = () => {
+            const cursor = this.state.cursors.hooks.protectionAuths;
+            const newAuths = this.state.protectionAuths.slice(cursor);
+
+            if (newAuths.length > 0) {
+                this.state.cursors.hooks.protectionAuths = this.state.protectionAuths.length;
+                callback(newAuths);
+            }
+        };
+
+        const interval = setInterval(poll, POLL_INTERVAL_MS);
+        this.pollIntervals.set(pollKey, interval);
+        poll();
+
+        console.log('🔔 [Yellow] Subscribed to Protection authorizations (for Hooks/Oracle)');
     }
 
     // =========================================================================

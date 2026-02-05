@@ -63,11 +63,11 @@ async function testConfiguration() {
   console.log("\n📋 Test 1: Configuration Validation");
   console.log("-".repeat(50));
 
-  // Verify testnet chain IDs
+  // Verify mainnet chain IDs (LI.FI doesn't support Sepolia)
   console.log("  Chain IDs:");
-  console.log(`    Ethereum Sepolia: ${ACTIVE_CHAIN_IDS.ethereumSepolia}`);
-  console.log(`    Base Sepolia: ${ACTIVE_CHAIN_IDS.baseSepolia}`);
-  console.log(`    Arbitrum Sepolia: ${ACTIVE_CHAIN_IDS.arbitrumSepolia}`);
+  console.log(`    Ethereum Mainnet: ${ACTIVE_CHAIN_IDS.ethereum}`);
+  console.log(`    Base Mainnet: ${ACTIVE_CHAIN_IDS.base}`);
+  console.log(`    Arbitrum Mainnet: ${ACTIVE_CHAIN_IDS.arbitrum}`);
 
   // Verify token addresses exist
   console.log("\n  Testnet Token Addresses:");
@@ -194,26 +194,26 @@ async function testCrossChainOrchestrator() {
 
   // Test 3.2: Route availability check
   console.log("\n  Test 3.2: Route availability check");
-  const routes = orchestrator.getAvailableRoutes(ACTIVE_CHAIN_IDS.ethereumSepolia);
-  console.log(`    Routes from Ethereum Sepolia: ${routes.length}`);
+  const routes = orchestrator.getAvailableRoutes(ACTIVE_CHAIN_IDS.ethereum);
+  console.log(`    Routes from Ethereum Mainnet: ${routes.length}`);
   routes.forEach((r) => {
     console.log(`      → ${r.toChainId} (${r.supportedTokens.join(", ")})`);
   });
 
   // Test 3.3: Safest chain selection
   console.log("\n  Test 3.3: Safest chain selection");
-  const safest1 = orchestrator.getSafestChain(ACTIVE_CHAIN_IDS.baseSepolia);
-  const safest2 = orchestrator.getSafestChain(ACTIVE_CHAIN_IDS.ethereumSepolia);
-  console.log(`    From Base Sepolia, safest: ${safest1}`);
-  console.log(`    From Ethereum Sepolia (excluded), safest: ${safest2}`);
+  const safest1 = orchestrator.getSafestChain(ACTIVE_CHAIN_IDS.base);
+  const safest2 = orchestrator.getSafestChain(ACTIVE_CHAIN_IDS.ethereum);
+  console.log(`    From Base Mainnet, safest: ${safest1}`);
+  console.log(`    From Ethereum Mainnet (excluded), safest: ${safest2}`);
 
   // Test 3.4: Defense execution (dry run)
   console.log("\n  Test 3.4: Defense execution (dry run)");
   try {
     const result = await orchestrator.executeDefense({
       action: "LIQUIDITY_REROUTE",
-      fromChainId: ACTIVE_CHAIN_IDS.ethereumSepolia,
-      toChainId: ACTIVE_CHAIN_IDS.baseSepolia,
+      fromChainId: ACTIVE_CHAIN_IDS.ethereum,
+      toChainId: ACTIVE_CHAIN_IDS.base,
       tokenSymbol: "ETH",
       amount: "0.01",
       decisionId: "test-decision-001",
