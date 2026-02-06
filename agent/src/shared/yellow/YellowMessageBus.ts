@@ -271,6 +271,10 @@ export class YellowMessageBus extends EventEmitter {
         console.log('👋 YellowMessageBus: Disconnected');
     }
 
+    isConnected(): boolean {
+        return this.connected;
+    }
+
     // =========================================================================
     // PUBLISH METHODS - Agents write messages to Yellow session state
     // =========================================================================

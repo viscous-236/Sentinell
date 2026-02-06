@@ -41,12 +41,14 @@ export default function SiteNav() {
         >
           <Github className="w-5 h-5" />
         </Link>
-        <Button
-          size="sm"
-          className="bg-white text-black hover:bg-gray-200 rounded-full px-6 font-medium transition-transform hover:scale-105"
-        >
-          Launch App
-        </Button>
+        <Link href="/launch">
+          <Button
+            size="sm"
+            className="bg-white text-black hover:bg-gray-200 rounded-full px-6 font-medium transition-transform hover:scale-105"
+          >
+            Launch App
+          </Button>
+        </Link>
       </div>
     </nav>
   );

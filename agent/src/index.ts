@@ -33,6 +33,8 @@ import {
   ThreatAPIServer,
   ThreatAPIConfig,
 } from "./executor/src/api/ThreatAPIServer";
+import { dashboardState } from "./executor/src/api/DashboardState";
+import { attackSimulator } from "./executor/src/api/AttackSimulator";
 
 dotenv.config();
 
@@ -223,11 +225,169 @@ function loadConfig() {
 
   // Threat API config
   const threatAPI: ThreatAPIConfig = {
-    port: parseInt(process.env.THREAT_API_PORT || "3001"),
+    port: parseInt(process.env.THREAT_API_PORT || "3000"),
     retentionMs: parseInt(process.env.THREAT_API_RETENTION_MS || "3600000"), // 1 hour default
   };
 
   return { yellow, scout, validator, riskEngine, executor, threatAPI };
+}
+
+/**
+ * Wire dashboard state to agents for data collection
+ * This enables real-time data streaming to the dashboard
+ */
+function wireDashboardToAgents(): void {
+  if (!riskEngine || !scoutAgent || !yellowMessageBus) {
+    console.warn("   ⚠️ Some agents not initialized, dashboard wiring incomplete");
+    return;
+  }
+
+  // Wire RiskEngine decisions to dashboard
+  riskEngine.on('decision', (decision: any) => {
+    dashboardState.updateRiskScore(decision);
+  });
+
+  // E2E Flow Tracking: Map to correlate events
+  const flowIdMap = new Map<string, string>(); // poolId -> flowId
+
+  // Wire Scout signals to dashboard + Start E2E flows
+  scoutAgent.on('signal', (signal: any) => {
+    dashboardState.ingestScoutSignal(signal);
+    
+    // E2E Flow: Start flow on Scout signal
+    if (signal.poolAddress && signal.magnitude > 0.5) {
+      const flowId = dashboardState.startE2EFlow(
+        signal.chain,
+        signal.poolAddress,
+        { type: signal.type, magnitude: signal.magnitude }
+      );
+      flowIdMap.set(signal.poolAddress, flowId);
+    }
+    
+    // Track gas prices for graphs from GAS_SPIKE signals
+    if (signal.type === 'GAS_SPIKE' && signal.raw?.gasPrice) {
+      const gasPriceGwei = parseFloat(signal.raw.gasPrice) / 1e9; // Convert wei to gwei
+      dashboardState.addGasDataPoint(signal.chain, gasPriceGwei);
+    }
+    
+    // Track prices for graphs from PRICE_MOVE signals
+    if (signal.type === 'PRICE_MOVE' && signal.raw?.price) {
+      dashboardState.addPriceDataPoint(
+        signal.pair,
+        parseFloat(signal.raw.price),
+        'dex'
+      );
+    }
+  });
+
+  // Direct wiring: Scout gasUpdate events → dashboard (real-time gas data)
+  scoutAgent.on('gasUpdate', (gas: any) => {
+    if (gas.gasPrice) {
+      const gasPriceGwei = parseFloat(gas.gasPrice) / 1e9;
+      dashboardState.addGasDataPoint(gas.chain, gasPriceGwei);
+    }
+  });
+
+  // Direct wiring: Scout price events → dashboard (real-time price data)
+  scoutAgent.on('price', (price: any) => {
+    if (price.price) {
+      dashboardState.addPriceDataPoint(
+        price.pair,
+        parseFloat(price.price),
+        'dex'
+      );
+    }
+  });
+
+  // E2E Flow: Yellow session creation
+  yellowMessageBus.on('ready', (data: any) => {
+    dashboardState.addLog('SUCCESS', 'yellow', `Yellow session created: ${data.sessionId}`);
+  });
+
+  yellowMessageBus.on('protectionAuth', (auth: any) => {
+    dashboardState.incrementYellowAuthorizations();
+    
+    // E2E Flow: Update to yellow_session stage
+    const flowId = flowIdMap.get(auth.poolId);
+    if (flowId && yellowMessageBus) {
+      dashboardState.updateE2EFlowStage(flowId, 'yellow_session', {
+        sessionId: yellowMessageBus.getState().sessionId,
+        signature: auth.signature,
+      });
+    }
+  });
+
+  // E2E Flow: Validator alerts
+  if (validatorAgent) {
+    validatorAgent.on('threat:alert', (alert: any) => {
+      const flowId = flowIdMap.get(alert.poolAddress);
+      if (flowId) {
+        dashboardState.updateE2EFlowStage(flowId, 'validator_alert', {
+          type: alert.type,
+          deviation: alert.deviation,
+        });
+      }
+    });
+  }
+
+  // E2E Flow: Risk Engine decisions
+  riskEngine.on('decision', (decision: any) => {
+    const flowId = flowIdMap.get(decision.targetPool);
+    if (flowId) {
+      dashboardState.updateE2EFlowStage(flowId, 'risk_decision', {
+        action: decision.action,
+        tier: decision.tier,
+        score: decision.compositeScore,
+      });
+    }
+  });
+
+  // E2E Flow: Executor actions
+  if (executorAgent) {
+    executorAgent.on('execution:success', (data: any) => {
+      const flowId = flowIdMap.get(data.decision?.targetPool);
+      if (flowId) {
+        dashboardState.updateE2EFlowStage(flowId, 'executor_action', {
+          txHash: data.txHash,
+          action: data.decision?.action,
+        });
+      }
+    });
+
+    // E2E Flow: Settlement confirmed (final stage)
+    // Use targetPool (raw address) for lookup since flowIdMap is keyed by pool address,
+    // not the keccak256 poolId used on-chain
+    executorAgent.on('settlement:confirmed', (data: any) => {
+      const flowId = flowIdMap.get(data.targetPool) || flowIdMap.get(data.poolId);
+      if (flowId) {
+        dashboardState.completeE2EFlow(flowId, data.txHash);
+        flowIdMap.delete(data.targetPool);
+        flowIdMap.delete(data.poolId);
+      }
+    });
+  }
+
+  // Wire Yellow channel state updates
+  if (yellowMessageBus.isConnected()) {
+    dashboardState.updateYellowChannel({ connected: true });
+  }
+
+  yellowMessageBus.on('connected', () => {
+    dashboardState.updateYellowChannel({ connected: true });
+  });
+
+  yellowMessageBus.on('disconnected', () => {
+    dashboardState.updateYellowChannel({ connected: false });
+  });
+
+  yellowMessageBus.on('message', () => {
+    dashboardState.incrementYellowMessages();
+  });
+
+  // Wire attack simulator to risk engine
+  attackSimulator.setRiskEngine(riskEngine);
+
+  console.log("   ✅ Dashboard wired to: RiskEngine, ScoutAgent, YellowMessageBus");
 }
 
 async function main(): Promise<void> {
@@ -320,12 +480,17 @@ async function main(): Promise<void> {
   await scoutAgent.start();
   await validatorAgent.start();
 
+  // 10. Wire dashboard state to agents for data collection
+  console.log("\n📊 Wiring Dashboard State...");
+  wireDashboardToAgents();
+  console.log("   ✅ Dashboard data collection active");
+
   console.log("\n✅ Sentinel is now protecting pools!");
   console.log(
     "   All agent communication flows through Yellow state channels.",
   );
   console.log(
-    `   Threat API available at http://localhost:${config.threatAPI.port}`,
+    `   Threat API available at http://0.0.0.0:${config.threatAPI.port}`,
   );
   console.log("   Press Ctrl+C to gracefully shutdown.\n");
 
