@@ -77,7 +77,7 @@ export class NitroliteClient {
     private availableAssets: any[] = [];
     private unifiedBalances: Map<string, string> = new Map(); // asset -> amount
 
-    private sentinelAddress: string; // The Sentinel smart contract/judge
+    private sentinelAddress: string; // The SentinelHook contract (Yellow state channel counterparty)
 
     private rpcRequestId: number = 0;
     private pendingRequests: Map<number, { resolve: (data: any) => void; reject: (error: Error) => void }> = new Map();
@@ -87,6 +87,13 @@ export class NitroliteClient {
 
     // Keepalive to prevent WebSocket disconnect
     private keepaliveInterval?: NodeJS.Timeout;
+
+    // Auto-reconnection state
+    private reconnecting: boolean = false;
+    private shouldReconnect: boolean = true;
+    private reconnectAttempts: number = 0;
+    private maxReconnectAttempts: number = 10;
+    private reconnectDelayMs: number = 2000;
 
     constructor(config: YellowConfig, sentinelAddress: string = '0x0000000000000000000000000000000000000001') {
         this.config = config;
@@ -163,16 +170,21 @@ export class NitroliteClient {
                     console.log('🔌 Disconnected from Yellow Network');
                     this.connected = false;
                     this.authenticated = false;
+
+                    // Auto-reconnect if we should (not during intentional disconnect)
+                    if (this.shouldReconnect && !this.reconnecting) {
+                        this.scheduleReconnect();
+                    }
                 });
 
                 await authPromise;
 
-                // Start keepalive ping every 30 seconds to prevent disconnect
+                // Start keepalive ping every 15 seconds to prevent disconnect
                 this.keepaliveInterval = setInterval(() => {
                     if (this.ws && this.connected) {
                         this.ws.ping();
                     }
-                }, 30000);
+                }, 15000);
 
                 console.log('🎉 Yellow Network ready!\n');
                 resolve();
@@ -181,6 +193,60 @@ export class NitroliteClient {
                 reject(error);
             }
         });
+    }
+
+    /**
+     * Schedule a reconnection attempt after disconnect
+     * Uses exponential backoff with maximum attempts
+     */
+    private scheduleReconnect(): void {
+        if (this.reconnecting || !this.shouldReconnect) {
+            return;
+        }
+
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.error(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+            return;
+        }
+
+        this.reconnecting = true;
+        this.reconnectAttempts++;
+
+        const delay = Math.min(this.reconnectDelayMs * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
+        console.log(`🔄 Reconnecting to Yellow Network in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+
+        setTimeout(async () => {
+            try {
+                // Clean up old connection
+                if (this.keepaliveInterval) {
+                    clearInterval(this.keepaliveInterval);
+                    this.keepaliveInterval = undefined;
+                }
+
+                // Reconnect
+                await this.connect();
+
+                // Reset reconnect state on success
+                this.reconnecting = false;
+                this.reconnectAttempts = 0;
+                console.log('✅ Reconnected to Yellow Network successfully');
+
+                // If we had an active session, the session is still valid on Yellow's side
+                // We just need to be authenticated to continue using it
+                if (this.currentAppSessionId) {
+                    console.log(`🔄 Restored session: ${this.currentAppSessionId.substring(0, 20)}...`);
+                }
+
+            } catch (error) {
+                console.error('❌ Reconnection failed:', error);
+                this.reconnecting = false;
+
+                // Schedule another attempt if we haven't hit the limit
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.scheduleReconnect();
+                }
+            }
+        }, delay);
     }
 
     /// Authenticate using EIP-712
@@ -733,6 +799,9 @@ export class NitroliteClient {
     }
 
     disconnect(): void {
+        // Prevent auto-reconnect on intentional disconnect
+        this.shouldReconnect = false;
+
         // Clear keepalive interval
         if (this.keepaliveInterval) {
             clearInterval(this.keepaliveInterval);

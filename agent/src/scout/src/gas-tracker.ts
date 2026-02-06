@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import { normalizeGasSpikeMagnitude } from './utils/magnitude';
+import { withRpcRetry } from '../../shared/utils/rpc-fallback';
 
 export interface GasData {
   chain: string;
@@ -59,8 +60,16 @@ export class GasTracker extends EventEmitter {
 
   private async updateGasPrice(chain: string, provider: ethers.Provider): Promise<void> {
     try {
-      const feeData = await provider.getFeeData();
-      const block = await provider.getBlock('latest');
+      // Wrap RPC calls with retry logic to handle rate limits
+      const [feeData, block] = await withRpcRetry(
+        async () => {
+          const fee = await provider.getFeeData();
+          const blk = await provider.getBlock('latest');
+          return [fee, blk];
+        },
+        3, // max 3 retries
+        2000 // 2 second delay
+      );
 
       if (!block) return;
 
@@ -106,8 +115,18 @@ export class GasTracker extends EventEmitter {
       this.gasHistory.set(chain, history);
 
       this.emit('gasUpdate', gasData);
-    } catch (error) {
-      console.error(`Error fetching gas price for ${chain}:`, error);
+    } catch (error: any) {
+      const is429 = 
+        error?.info?.error?.code === 429 ||
+        error?.code === 'CALL_EXCEPTION' ||
+        error?.message?.includes('exceeded') ||
+        error?.message?.includes('rate limit');
+      
+      if (is429) {
+        console.warn(`⚠️  Rate limit reached for gas tracking on ${chain}. Using fallback RPC or increase SCOUT_GAS_INTERVAL.`);
+      } else {
+        console.error(`Error fetching gas price for ${chain}:`, error.message || error);
+      }
     }
   }
 

@@ -53,7 +53,7 @@ export class ThreatAPIServer {
     this.httpServer = createServer(this.app);
     this.io = new SocketIOServer(this.httpServer, {
       cors: {
-        origin: ["http://localhost:8000", "http://127.0.0.1:8000"],
+        origin: ["http://localhost:8000", "http://localhost:3000", "http://127.0.0.1:8000", "http://127.0.0.1:3000"],
         methods: ["GET", "POST"],
       },
     });
@@ -70,7 +70,7 @@ export class ThreatAPIServer {
     // CORS for frontend
     this.app.use(
       cors({
-        origin: ["http://localhost:8000", "http://127.0.0.1:8000"],
+        origin: ["http://localhost:8000", "http://localhost:3000", "http://127.0.0.1:8000", "http://127.0.0.1:3000"],
         methods: ["GET", "POST", "OPTIONS"],
         allowedHeaders: ["Content-Type"],
       }),
@@ -269,6 +269,9 @@ export class ThreatAPIServer {
             "ORACLE_MANIPULATION",
             "FLASH_LOAN",
             "CROSS_CHAIN",
+            "JIT_LIQUIDITY",
+            "FRONTRUN",
+            "TOXIC_ARBITRAGE",
           ];
           if (!validTypes.includes(type)) {
             res.status(400).json({
@@ -392,6 +395,10 @@ export class ThreatAPIServer {
 
     dashboardState.on("execution", (entry: any) => {
       this.io.emit("execution", entry);
+    });
+
+    dashboardState.on("executionUpdate", (entry: any) => {
+      this.io.emit("executionUpdate", entry);
     });
 
     dashboardState.on("gasUpdate", (point: GasDataPoint) => {

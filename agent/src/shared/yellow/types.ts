@@ -4,6 +4,7 @@ export interface YellowConfig {
     privateKey: `0x${string}`; // Private key for signing
     rpcUrl: string; // RPC URL for on-chain operations (e.g., Sepolia)
     network: 'sandbox' | 'production';
+    sentinelAddress?: string; // SentinelHook contract address (counterparty in Yellow state channel sessions)
 }
 
 export type SessionId = string;

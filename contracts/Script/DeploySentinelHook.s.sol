@@ -36,7 +36,7 @@ contract DeploySentinelHook is Script {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev CREATE2 salt — keep constant across deployments
-    bytes32 public constant SALT = keccak256("SENTINELV04");
+    bytes32 public constant SALT = keccak256("SENTINELV01_HOOK");
 
     /// @dev Base swap fee (0.3% expressed in Uniswap v4 fee units)
     uint24 public constant BASE_FEE = 3000;

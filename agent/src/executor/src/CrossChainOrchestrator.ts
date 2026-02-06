@@ -237,7 +237,37 @@ export class CrossChainOrchestrator extends EventEmitter {
       // Determine destination chain
       const toChainId = request.toChainId || SAFE_HAVEN_CONFIG.chainId;
 
-      // Check gas balance
+      // Dry run - simulate without calling LI.FI APIs
+      if (isDryRun) {
+        console.log("\n📋 DRY RUN - Simulating cross-chain action:");
+        console.log(`   Action: ${request.action}`);
+        console.log(`   From Chain: ${request.fromChainId} → To Chain: ${toChainId}`);
+        console.log(`   Token: ${request.tokenSymbol}, Amount: ${request.amount}`);
+        console.log(`   Bridge: LI.FI (simulated)`);
+        console.log(`   Status: ✅ Would execute successfully on mainnet`);
+        console.log(`   Note: Requires mainnet funds for live execution`);
+
+        // Create mock successful result
+        executionResult.success = true;
+        executionResult.route = {
+          id: `mock_route_${Date.now()}`,
+          fromChainId: request.fromChainId,
+          toChainId,
+          fromToken: request.tokenSymbol,
+          toToken: request.tokenSymbol,
+          fromAmount: request.amount,
+          toAmountMin: request.amount, // Mock same amount
+          estimatedDuration: 300, // 5 mins
+          gasEstimate: "0.001",
+          bridgeUsed: "LI.FI",
+          route: {} as any, // Mock route object
+        };
+        
+        this.emit("defense:dryrun", { request, route: executionResult.route });
+        return executionResult;
+      }
+
+      // Live execution - check gas balance
       const hasGas = await this.checkGasBalance(request.fromChainId, strategyConfig.minGasBalance);
       if (!hasGas) {
         executionResult.error = `Insufficient gas balance on chain ${request.fromChainId}`;

@@ -1,8 +1,10 @@
 {
   "network": "ethereum-sepolia",
   "chainId": "11155111",
-  "sentinelHook": "0xA276bED88983f4a149D7A11e8c1EDE7f4f8232d4",
+  "sentinelHook": "0xb0dD144187F0e03De762E05F7097E77A9aB9765b",
   "poolManager": "0x8C4BcBE6b9eF47855f97E675296FA3F6fafa5F1A",
   "baseFee": "3000",
-  "deployer": "0xC25dA7A84643E29819e93F4Cb4442e49604662f1"
+  "deployer": "0xC25dA7A84643E29819e93F4Cb4442e49604662f1",
+  "deployedAt": "2026-02-06",
+  "verified": true
 }

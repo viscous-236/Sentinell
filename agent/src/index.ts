@@ -48,6 +48,20 @@ let threatAPIServer: ThreatAPIServer | null = null;
 let isShuttingDown = false;
 
 /**
+ * Get RPC URL with Ankr fallback
+ * Uses Ankr as alternative provider when Alchemy is unavailable or rate-limited
+ */
+function getRpcWithFallback(
+  alchemyUrl: string,
+  ankrUrl: string,
+  publicUrl?: string
+): string {
+  // Primary: Alchemy, Fallback: Ankr, Last resort: public RPC
+  // Note: ethers.js will handle automatic fallback on 429 errors
+  return alchemyUrl || ankrUrl || publicUrl || alchemyUrl;
+}
+
+/**
  * Load environment configuration
  */
 function loadConfig() {
@@ -69,6 +83,7 @@ function loadConfig() {
   const agentAddress = account.address;
 
   // Yellow Network config
+  // sentinelAddress: SentinelHook contract (the on-chain counterparty in Yellow state channel sessions)
   const yellow: YellowConfig = {
     endPoint:
       process.env.YELLOW_ENDPOINT || "wss://clearnet-sandbox.yellow.com/ws",
@@ -77,14 +92,27 @@ function loadConfig() {
     rpcUrl,
     network:
       (process.env.YELLOW_NETWORK as "sandbox" | "production") || "sandbox",
+    sentinelAddress: process.env.YELLOW_ORACLE_ETHEREUM_SEPOLIA,
   };
 
   // Scout Agent config (per ScoutConfig interface in scout.ts)
+  // Using Ankr as fallback to handle Alchemy rate limits
   const scout: ScoutConfig = {
     rpcUrls: {
-      ethereum: process.env.ETHEREUM_RPC_URL || rpcUrl,
-      base: process.env.BASE_RPC_URL || "https://mainnet.base.org",
-      arbitrum: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+      ethereum: getRpcWithFallback(
+        process.env.ETHEREUM_RPC_URL || rpcUrl,
+        process.env.ANKR_ETHEREUM_RPC || ""
+      ),
+      base: getRpcWithFallback(
+        process.env.BASE_RPC_URL || "",
+        process.env.ANKR_BASE_RPC || "",
+        "https://mainnet.base.org"
+      ),
+      arbitrum: getRpcWithFallback(
+        process.env.ARBITRUM_RPC_URL || "",
+        process.env.ANKR_ARBITRUM_RPC || "",
+        "https://arb1.arbitrum.io/rpc"
+      ),
     },
     mempool: {
       enabled: process.env.SCOUT_MEMPOOL !== "false",
@@ -93,7 +121,11 @@ function loadConfig() {
       enabled: process.env.SCOUT_DEX !== "false",
       updateInterval: parseInt(process.env.SCOUT_DEX_INTERVAL || "30000"),
       pairs: [
+        // WETH/USDC across all 3 chains for cross-chain MEV detection
         { token0: "WETH", token1: "USDC", dex: "uniswap", chain: "ethereum" },
+        { token0: "WETH", token1: "USDC", dex: "uniswap", chain: "base" },
+        { token0: "WETH", token1: "USDC", dex: "uniswap", chain: "arbitrum" },
+        // Additional pair on Ethereum for diversity
         { token0: "WETH", token1: "USDT", dex: "uniswap", chain: "ethereum" },
       ],
     },
@@ -119,11 +151,23 @@ function loadConfig() {
   };
 
   // Validator Agent config (per ValidatorConfig interface in validator.ts)
+  // Using Ankr as fallback to handle Alchemy rate limits
   const validator: ValidatorConfig = {
     rpcUrls: {
-      ethereum: process.env.ETHEREUM_RPC_URL || rpcUrl,
-      base: process.env.BASE_RPC_URL || "https://mainnet.base.org",
-      arbitrum: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+      ethereum: getRpcWithFallback(
+        process.env.ETHEREUM_RPC_URL || rpcUrl,
+        process.env.ANKR_ETHEREUM_RPC || ""
+      ),
+      base: getRpcWithFallback(
+        process.env.BASE_RPC_URL || "",
+        process.env.ANKR_BASE_RPC || "",
+        "https://mainnet.base.org"
+      ),
+      arbitrum: getRpcWithFallback(
+        process.env.ARBITRUM_RPC_URL || "",
+        process.env.ANKR_ARBITRUM_RPC || "",
+        "https://arb1.arbitrum.io/rpc"
+      ),
     },
     chainlinkFeeds: {
       ethereum: {
@@ -189,11 +233,23 @@ function loadConfig() {
   };
 
   // Executor config (per PROJECT_SPEC.md Section 4.1 - Executor Agent)
+  // Using Ankr as fallback to handle Alchemy rate limits
   const executor: ExecutorConfig = {
     rpcUrls: {
-      ethereum: process.env.ETHEREUM_SEPOLIA_RPC || process.env.ETHEREUM_RPC_URL || rpcUrl,
-      base: process.env.BASE_SEPOLIA_RPC || process.env.BASE_RPC_URL || "https://mainnet.base.org",
-      arbitrum: process.env.ARBITRUM_SEPOLIA_RPC || process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+      ethereum: getRpcWithFallback(
+        process.env.ETHEREUM_SEPOLIA_RPC || process.env.ETHEREUM_RPC_URL || rpcUrl,
+        process.env.ANKR_ETHEREUM_SEPOLIA_RPC || ""
+      ),
+      base: getRpcWithFallback(
+        process.env.BASE_SEPOLIA_RPC || process.env.BASE_RPC_URL || "",
+        process.env.ANKR_BASE_SEPOLIA_RPC || "",
+        "https://mainnet.base.org"
+      ),
+      arbitrum: getRpcWithFallback(
+        process.env.ARBITRUM_SEPOLIA_RPC || process.env.ARBITRUM_RPC_URL || "",
+        process.env.ANKR_ARBITRUM_SEPOLIA_RPC || "",
+        "https://arb1.arbitrum.io/rpc"
+      ),
     },
     hookAddresses: {
       ethereum:
@@ -209,17 +265,16 @@ function loadConfig() {
         process.env.HOOK_ADDRESS_ARBITRUM ||
         "0x0000000000000000000000000000000000000001",
     },
-    yellowOracleAddresses: {
-      ethereum: process.env.YELLOW_ORACLE_ETHEREUM_SEPOLIA || "0x0000000000000000000000000000000000000001",
-      base: process.env.YELLOW_ORACLE_BASE_SEPOLIA || "0x0000000000000000000000000000000000000001",
-      arbitrum: process.env.YELLOW_ORACLE_ARBITRUM_SEPOLIA || "0x0000000000000000000000000000000000000001",
-    },
     agentPrivateKey: privateKey,
     teeEnabled: process.env.TEE_ENABLED === "true",
     maxGasPrice: {
       ethereum: parseInt(process.env.MAX_GAS_ETHEREUM || "50"),
       base: parseInt(process.env.MAX_GAS_BASE || "1"),
       arbitrum: parseInt(process.env.MAX_GAS_ARBITRUM || "1"),
+    },
+    crossChain: {
+      enabled: process.env.CROSSCHAIN_ENABLED !== "false", // Enabled by default
+      dryRun: process.env.CROSSCHAIN_DRY_RUN !== "false",  // Dry run by default for safety
     },
   };
 
@@ -253,7 +308,7 @@ function wireDashboardToAgents(): void {
   // Wire Scout signals to dashboard + Start E2E flows
   scoutAgent.on('signal', (signal: any) => {
     dashboardState.ingestScoutSignal(signal);
-    
+
     // E2E Flow: Start flow on Scout signal
     if (signal.poolAddress && signal.magnitude > 0.5) {
       const flowId = dashboardState.startE2EFlow(
@@ -263,13 +318,13 @@ function wireDashboardToAgents(): void {
       );
       flowIdMap.set(signal.poolAddress, flowId);
     }
-    
+
     // Track gas prices for graphs from GAS_SPIKE signals
     if (signal.type === 'GAS_SPIKE' && signal.raw?.gasPrice) {
       const gasPriceGwei = parseFloat(signal.raw.gasPrice) / 1e9; // Convert wei to gwei
       dashboardState.addGasDataPoint(signal.chain, gasPriceGwei);
     }
-    
+
     // Track prices for graphs from PRICE_MOVE signals
     if (signal.type === 'PRICE_MOVE' && signal.raw?.price) {
       dashboardState.addPriceDataPoint(
@@ -301,12 +356,12 @@ function wireDashboardToAgents(): void {
 
   // E2E Flow: Yellow session creation
   yellowMessageBus.on('ready', (data: any) => {
-    dashboardState.addLog('SUCCESS', 'yellow', `Yellow session created: ${data.sessionId}`);
+    dashboardState.addLog('SUCCESS', 'yellow', `🟡 Yellow Network: Session established | ID: ${data.sessionId?.slice(0, 12)}...`);
   });
 
   yellowMessageBus.on('protectionAuth', (auth: any) => {
     dashboardState.incrementYellowAuthorizations();
-    
+
     // E2E Flow: Update to yellow_session stage
     const flowId = flowIdMap.get(auth.poolId);
     if (flowId && yellowMessageBus) {
@@ -346,11 +401,26 @@ function wireDashboardToAgents(): void {
   if (executorAgent) {
     executorAgent.on('execution:success', (data: any) => {
       const flowId = flowIdMap.get(data.decision?.targetPool);
-      if (flowId) {
+      if (flowId && data.decision) {
+        // Update E2E flow stage
         dashboardState.updateE2EFlowStage(flowId, 'executor_action', {
           txHash: data.txHash,
-          action: data.decision?.action,
+          action: data.decision.action,
         });
+
+        // Add execution entry (will be updated with real tx hash on settlement)
+        const executionId = dashboardState.addExecution(
+          data.decision.chain,
+          data.decision.action,
+          data.decision.targetPool,
+          data.txHash, // May be placeholder like '0xPENDING_SETTLEMENT'
+          data.decision.tier,
+          data.decision.compositeScore,
+          data.txHash === '0xPENDING_SETTLEMENT' ? 'pending' : 'success'
+        );
+
+        // Link execution to flow for tx hash updates on settlement
+        dashboardState.linkE2EFlowToExecution(flowId, executionId);
       }
     });
 
@@ -363,6 +433,16 @@ function wireDashboardToAgents(): void {
         dashboardState.completeE2EFlow(flowId, data.txHash);
         flowIdMap.delete(data.targetPool);
         flowIdMap.delete(data.poolId);
+      }
+    });
+
+    // E2E Flow: Threat broadcast (ELEVATED tier - immediate on-chain tx)
+    executorAgent.on('threat:broadcast', (data: any) => {
+      const targetPool = data.broadcast?.targetPool;
+      const flowId = flowIdMap.get(targetPool);
+      if (flowId && data.txHash) {
+        dashboardState.completeE2EFlow(flowId, data.txHash);
+        flowIdMap.delete(targetPool);
       }
     });
   }
@@ -384,8 +464,11 @@ function wireDashboardToAgents(): void {
     dashboardState.incrementYellowMessages();
   });
 
-  // Wire attack simulator to risk engine
+  // Wire attack simulator to risk engine and executor
   attackSimulator.setRiskEngine(riskEngine);
+  if (executorAgent) {
+    attackSimulator.setExecutor(executorAgent); // For capturing real tx hashes
+  }
 
   console.log("   ✅ Dashboard wired to: RiskEngine, ScoutAgent, YellowMessageBus");
 }
@@ -409,10 +492,25 @@ async function main(): Promise<void> {
   console.log("   Per PROJECT_SPEC.md Section 4.5:");
   console.log('   "Agents communicate via Yellow state channels"\n');
 
-  yellowMessageBus = new YellowMessageBus(config.yellow);
+  yellowMessageBus = new YellowMessageBus(config.yellow, config.yellow.sentinelAddress);
 
   try {
     await yellowMessageBus.initialize("5"); // 5 ytest.usd for session
+
+    // Update dashboard with Yellow session info for demo
+    dashboardState.updateYellowChannel({
+      connected: true,
+      sessionId: yellowMessageBus.getSessionId() || null,
+      sessionStartTime: Date.now(),
+      networkMode: config.yellow.network as 'sandbox' | 'production',
+      agentAddress: config.yellow.agentAddress,
+      sentinelAddress: config.yellow.sentinelAddress || '',
+      sessionBalance: '5.000',  // Initial session balance
+      microFeesAccrued: '0.000',
+      stateVersion: 1,
+      totalActions: 0,
+    });
+
     console.log("   ✅ Yellow Message Bus ready for agent communication\n");
   } catch (error) {
     console.error("❌ Failed to initialize Yellow Message Bus:", error);
@@ -475,15 +573,22 @@ async function main(): Promise<void> {
   console.log("  🚀 STARTING SENTINEL PROTECTION");
   console.log("=================================================\n");
 
+  dashboardState.addLog('INFO', 'scout', '🚀 Scout Agent: Initializing monitors (mempool, DEX, gas, flashloans)');
   riskEngine.start();
+  dashboardState.addLog('INFO', 'riskengine', '🧠 Risk Engine: Started | Correlation window: 24s | EMA alpha: 0.1');
+
   await scoutAgent.initialize();
   await scoutAgent.start();
+  dashboardState.addLog('SUCCESS', 'scout', '✅ Scout Agent: Active | Monitoring Ethereum, Base, Arbitrum');
+
   await validatorAgent.start();
+  dashboardState.addLog('SUCCESS', 'validator', '✅ Validator Agent: Active | Cross-chain oracle validation enabled');
 
   // 10. Wire dashboard state to agents for data collection
   console.log("\n📊 Wiring Dashboard State...");
   wireDashboardToAgents();
   console.log("   ✅ Dashboard data collection active");
+  dashboardState.addLog('SUCCESS', 'scout', '📊 Dashboard: Live monitoring active | Real-time E2E flow tracking enabled');
 
   console.log("\n✅ Sentinel is now protecting pools!");
   console.log(

@@ -420,6 +420,14 @@ export function wireAllAgentsToYellow(
     const riskEngineAdapter = new RiskEngineYellowAdapter(messageBus, agents.riskEngine);
     const executorAdapter = new ExecutorYellowAdapter(messageBus, agents.executor);
 
+    // CRITICAL: Also give Executor a direct reference to YellowMessageBus
+    // This allows Executor to publish off-chain authorizations via Yellow
+    // Without this, Executor falls back to on-chain transactions (slow, frontrunnable)
+    if (typeof (agents.executor as any).setYellowMessageBus === 'function') {
+        (agents.executor as any).setYellowMessageBus(messageBus);
+        console.log('🔗 Executor: Direct MessageBus reference set for off-chain auth');
+    }
+
     console.log('\n✅ All agents wired to Yellow Message Bus');
     console.log('   Communication flow:');
     console.log('   Scout → Yellow → RiskEngine → Yellow → Executor → Yellow\n');

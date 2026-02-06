@@ -747,7 +747,7 @@ export class YellowMessageBus extends EventEmitter {
         this.pollIntervals.set(pollKey, interval);
         poll();
 
-        console.log('🔔 [Yellow] Subscribed to Protection authorizations (for Hooks/Oracle)');
+        console.log('🔔 [Yellow] Subscribed to Protection authorizations (for Hook activation)');
     }
 
     // =========================================================================
@@ -872,6 +872,25 @@ export class YellowMessageBus extends EventEmitter {
             totalMessages: this.state.microFees.actionCount,
             microFeesAccrued: this.state.microFees.totalAccrued,
         };
+    }
+
+    /**
+     * Get current session statistics for dashboard
+     */
+    getSessionStats() {
+        return {
+            sessionBalance: '0.000',  // Would need to track from Yellow balance updates
+            microFeesAccrued: this.state.microFees.totalAccrued,
+            stateVersion: this.state.version,
+            totalActions: this.state.microFees.actionCount,
+        };
+    }
+
+    /**
+     * Get current session ID
+     */
+    getSessionId(): string | undefined {
+        return this.sessionId;
     }
 
     /**

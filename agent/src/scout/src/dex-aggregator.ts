@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { EventEmitter } from 'events';
 import { normalizePriceChangeMagnitude } from './utils/magnitude';
 import { DEX_FACTORY_ADDRESSES, COMMON_TOKENS } from '../config/constants';
+import { withRpcRetry } from '../../shared/utils/rpc-fallback';
 
 export interface DexPrice {
   dex: 'uniswap' | 'curve' | 'sushiswap';
@@ -102,12 +103,19 @@ export class DexAggregator extends EventEmitter {
       if (isV3Pool) {
         // Uniswap V3 pool - use slot0() to get sqrtPriceX96
         const poolContract = new ethers.Contract(pairAddress, POOL_ABI_V3, provider);
-        const [sqrtPriceX96] = await poolContract.slot0();
-        const liquidityValue = await poolContract.liquidity();
-
-        // Get actual token order from pool (V3 stores them in sorted order)
-        const poolToken0Addr = await poolContract.token0();
-        const poolToken1Addr = await poolContract.token1();
+        
+        // Wrap contract calls with retry logic to handle rate limits
+        const [sqrtPriceX96, liquidityValue, poolToken0Addr, poolToken1Addr] = await withRpcRetry(
+          async () => {
+            const [slot0Result] = await poolContract.slot0();
+            const liq = await poolContract.liquidity();
+            const t0 = await poolContract.token0();
+            const t1 = await poolContract.token1();
+            return [slot0Result, liq, t0, t1];
+          },
+          3, // max 3 retries
+          2000 // 2 second delay
+        );
 
         // Get token addresses from config
         const chainTokens = (COMMON_TOKENS as any)[pairConfig.chain];
@@ -163,7 +171,13 @@ export class DexAggregator extends EventEmitter {
       } else {
         // V2-style pool (SushiSwap, Uniswap V2, etc) - use getReserves()
         const pairContract = new ethers.Contract(pairAddress, PAIR_ABI_V2, provider);
-        const [reserve0, reserve1] = await pairContract.getReserves();
+        
+        // Wrap contract call with retry logic to handle rate limits
+        const [reserve0, reserve1] = await withRpcRetry(
+          async () => await pairContract.getReserves(),
+          3, // max 3 retries
+          2000 // 2 second delay
+        );
 
         // Check for minimal liquidity
         const minReserve0 = BigInt(10 ** decimals0); // ~1 unit of token0
@@ -220,8 +234,18 @@ export class DexAggregator extends EventEmitter {
           });
         }
       }
-    } catch (error) {
-      console.error(`Error fetching price for ${pairConfig.dex}:`, error);
+    } catch (error: any) {
+      const is429 = 
+        error?.info?.error?.code === 429 ||
+        error?.code === 'CALL_EXCEPTION' ||
+        error?.message?.includes('exceeded') ||
+        error?.message?.includes('rate limit');
+      
+      if (is429) {
+        console.warn(`⚠️  Rate limit reached for ${pairConfig.dex} on ${pairConfig.chain}. Retry with fallback RPC or increase SCOUT_DEX_INTERVAL.`);
+      } else {
+        console.error(`Error fetching price for ${pairConfig.dex}:`, error.message || error);
+      }
     }
   }
 

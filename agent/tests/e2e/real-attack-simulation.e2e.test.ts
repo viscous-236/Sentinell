@@ -1,5 +1,17 @@
-/**
- * Real Attack Simulation E2E Test
+/** * ⚠️ DEPRECATED TEST FILE
+ * 
+ * This test file references YellowOracle which has been removed from the architecture.
+ * YellowOracle was removed because the Hook already has activation functions.
+ * 
+ * See YELLOW_ORACLE_REMOVAL.md for details.
+ * 
+ * TODO: Update this test to use direct Hook method calls:
+ * - Replace yellowOracleContract calls with hookContract methods
+ * - Remove YellowOracle authorization checks
+ * - Test Hook state directly (protections[], breakers[], oracleConfigs[])
+ */
+
+/** * Real Attack Simulation E2E Test
  * 
  * Tests instant Yellow protection with REAL contract interactions:
  * 1. Scout detects threat

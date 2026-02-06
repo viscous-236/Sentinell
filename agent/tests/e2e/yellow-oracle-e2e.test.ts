@@ -1,4 +1,18 @@
 /**
+ * ⚠️ DEPRECATED TEST FILE
+ * 
+ * This test file references YellowOracle which has been removed from the architecture.
+ * YellowOracle was removed because the Hook already has activation functions.
+ * 
+ * See YELLOW_ORACLE_REMOVAL.md for details.
+ * 
+ * TODO: Update this test to use direct Hook method calls:
+ * - Replace yellowOracleContract.commitProtection() with hookContract.activateProtection()
+ * - Remove YellowOracle authorization checks
+ * - Test Hook state directly (protections[], breakers[], oracleConfigs[])
+ */
+
+/**
  * Comprehensive E2E Attack Scenario Testing with YellowOracle Integration
  * 
  * Tests Sentinel's ability to detect and defend against:

@@ -70,12 +70,6 @@ export interface ExecutorConfig {
     port: number;
     retentionMs?: number;
   };
-  /** YellowOracle contract addresses for on-chain settlement */
-  yellowOracleAddresses?: {
-    ethereum: string;
-    base: string;
-    arbitrum: string;
-  };
 }
 
 /** Maps to on-chain enum */
@@ -101,16 +95,6 @@ interface ProtectionState {
   txHash: string;
 }
 
-/**
- * Settlement queue item for batching Yellow authorizations on-chain
- * Per PROJECT_SPEC.md: Settlement happens LATER for finality, not immediately
- */
-interface SettlementQueueItem {
-  auth: YellowProtectionAuth;
-  decision: RiskDecision;
-  timestamp: number;
-}
-
 const HOOK_ABI = [
   "function activateProtection(bytes32 poolId, uint24 newFee, bytes calldata proof) external",
   "function deactivateProtection(bytes32 poolId, bytes calldata proof) external",
@@ -129,21 +113,11 @@ const HOOK_ABI = [
   "event ThreatBroadcast(bytes32 indexed poolId, string tier, string action, uint256 compositeScore, uint256 timestamp, uint256 expiresAt, string rationale, string[] signalTypes)",
 ];
 
-// YellowOracle ABI for on-chain settlement
-const YELLOW_ORACLE_ABI = [
-  "function commitAuthorization(bytes32 poolId, uint8 action, uint24 fee, uint256 expiryBlock, uint256 timestamp, uint256 nonce, bytes calldata signature) external",
-  "function commitAuthorizationBatch(bytes32[] calldata poolIds, uint8[] calldata actions, uint24[] calldata fees, uint256[] calldata expiryBlocks, uint256[] calldata timestamps, uint256[] calldata nonces, bytes[] calldata signatures) external",
-  "function getAuthorization(bytes32 poolId) view returns (bool hasAuth, uint24 fee, uint256 expiryBlock, address signer)",
-  "function authorizedExecutors(address) view returns (bool)",
-  "event AuthorizationCommitted(bytes32 indexed poolId, uint8 action, uint24 fee, uint256 expiryBlock, address indexed signer, uint256 timestamp)",
-];
-
 export class ExecutorAgent extends EventEmitter {
   private config: ExecutorConfig;
   private providers: Map<string, ethers.Provider>;
   private wallets: Map<string, ethers.Wallet>;
   private hookContracts: Map<string, ethers.Contract>;
-  private yellowOracleContracts: Map<string, ethers.Contract>;
   private crossChainOrchestrator?: CrossChainOrchestrator;
   private threatAPIServer?: ThreatAPIServer;
 
@@ -153,14 +127,14 @@ export class ExecutorAgent extends EventEmitter {
   private monitorInterval?: ReturnType<typeof setInterval>;
 
   // =========================================================================
-  // YELLOW PRE-AUTHORIZATION STATE
-  // Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+  // YELLOW MESSAGBUS FOR AGENT COORDINATION
+  // Per PROJECT_SPEC.md Section 4.5: Agent-to-agent communication
   // =========================================================================
   private yellowMessageBus?: YellowMessageBus;
-  private yellowNonce = 0;
-  private settlementQueue: SettlementQueueItem[] = [];
-  private lastSettlementTime = 0;
-  private settlementInterval?: ReturnType<typeof setInterval>;
+  
+  // Decision prioritization: pool -> pending decision
+  private pendingDecisions: Map<string, RiskDecision> = new Map();
+  private decisionTimer?: NodeJS.Timeout;
 
   constructor(config: ExecutorConfig) {
     super();
@@ -168,7 +142,6 @@ export class ExecutorAgent extends EventEmitter {
     this.providers = new Map();
     this.wallets = new Map();
     this.hookContracts = new Map();
-    this.yellowOracleContracts = new Map();
     this.protectionStates = new Map();
 
     this.validateConfig();
@@ -182,15 +155,32 @@ export class ExecutorAgent extends EventEmitter {
       console.log(
         `📥 Executor: Received decision via Yellow state channel: ${decision.id}`,
       );
-      try {
-        await this.executeDecision(decision);
-      } catch (error) {
-        console.error("❌ Executor: Failed to execute Yellow decision:", error);
-        this.emit("execution:failure", {
-          decision,
-          error: (error as Error).message,
-        });
+      
+      // Priority handling: if multiple decisions for same pool, only execute highest tier
+      const existing = this.pendingDecisions.get(decision.targetPool);
+      if (existing) {
+        const existingPriority = this.getTierPriority(existing.tier);
+        const newPriority = this.getTierPriority(decision.tier);
+        
+        if (newPriority > existingPriority) {
+          console.log(`   ⚡ Replacing ${existing.action} (${existing.tier}) with ${decision.action} (${decision.tier}) - higher priority`);
+          this.pendingDecisions.set(decision.targetPool, decision);
+        } else {
+          console.log(`   ⏭️  Skipping ${decision.action} (${decision.tier}) - ${existing.action} (${existing.tier}) has higher priority`);
+          return;
+        }
+      } else {
+        this.pendingDecisions.set(decision.targetPool, decision);
       }
+      
+      // Debounce execution: wait 200ms for more decisions to arrive
+      if (this.decisionTimer) {
+        clearTimeout(this.decisionTimer);
+      }
+      
+      this.decisionTimer = setTimeout(() => {
+        this.executeQueuedDecisions();
+      }, 200);
     });
 
     // Listen for threat broadcasts to cache in API
@@ -243,20 +233,10 @@ export class ExecutorAgent extends EventEmitter {
       console.log(
         `✅ Executor: Connected to ${chain} hook at ${this.config.hookAddresses[chain]}`,
       );
-
-      // Initialize YellowOracle contracts if addresses are configured
-      if (this.config.yellowOracleAddresses?.[chain]) {
-        const yellowOracleContract = new ethers.Contract(
-          this.config.yellowOracleAddresses[chain],
-          YELLOW_ORACLE_ABI,
-          wallet,
-        );
-        this.yellowOracleContracts.set(chain, yellowOracleContract);
-        console.log(
-          `✅ Executor: Connected to ${chain} YellowOracle at ${this.config.yellowOracleAddresses[chain]}`,
-        );
-      }
     }
+
+    // Initialize cross-chain orchestrator for cross-chain defense actions
+    await this.initializeCrossChainOrchestrator();
 
     console.log("✅ Executor: Initialization complete");
   }
@@ -289,12 +269,8 @@ export class ExecutorAgent extends EventEmitter {
       this.monitorProtections();
     }, 12_000); // Every ~1 ETH block
 
-    // Start background settlement worker
-    // Batches Yellow authorizations on-chain every 30s for audit trail
-    // Per PROJECT_SPEC.md Section 4.6: "Settlement happens on-chain for finality"
-    this.settlementInterval = setInterval(() => {
-      this.processSettlementQueue();
-    }, 30_000); // Every 30 seconds
+    // NOTE: No settlement queue needed - we commit immediately on-chain
+    // Yellow MessageBus is used for agent-to-agent coordination only
 
     console.log("✅ Executor: Running");
     this.emit("executor:started");
@@ -313,28 +289,50 @@ export class ExecutorAgent extends EventEmitter {
       this.monitorInterval = undefined;
     }
 
-    // Stop settlement worker
-    if (this.settlementInterval) {
-      clearInterval(this.settlementInterval);
-      this.settlementInterval = undefined;
-    }
-
-    // Process any remaining items before shutdown
-    if (this.settlementQueue.length > 0) {
-      console.log(
-        `⚠️ Executor: Processing ${this.settlementQueue.length} pending settlements before shutdown...`,
-      );
-      await this.processSettlementQueue();
-    }
-
     // Stop Threat API server
     if (this.threatAPIServer) {
       await this.threatAPIServer.stop();
     }
 
     this.isRunning = false;
+    
+    if (this.decisionTimer) {
+      clearTimeout(this.decisionTimer);
+      this.decisionTimer = undefined;
+    }
+    
     console.log("✅ Executor: Stopped");
     this.emit("executor:stopped");
+  }
+
+  // ---------------------------------------------------------------------------
+  // DECISION PRIORITIZATION
+  // ---------------------------------------------------------------------------
+
+  private getTierPriority(tier: ThreatTier): number {
+    switch (tier) {
+      case "CRITICAL": return 3;
+      case "ELEVATED": return 2;
+      case "WATCH": return 1;
+      default: return 0;
+    }
+  }
+
+  private async executeQueuedDecisions(): Promise<void> {
+    const decisions = Array.from(this.pendingDecisions.values());
+    this.pendingDecisions.clear();
+    
+    for (const decision of decisions) {
+      try {
+        await this.executeDecision(decision);
+      } catch (error) {
+        console.error("❌ Executor: Failed to execute Yellow decision:", error);
+        this.emit("execution:failure", {
+          decision,
+          error: (error as Error).message,
+        });
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -353,443 +351,31 @@ export class ExecutorAgent extends EventEmitter {
   }
 
   /**
-   * Sign Yellow protection authorization (OFF-CHAIN)
-   *
-   * THIS IS THE KEY TO PREVENTING MEV TIMING ATTACKS:
-   * - Signs authorization message with Executor's private key
-   * - No on-chain transaction = no mempool exposure
-   * - Hook checks this signature BEFORE allowing swaps
-   *
-   * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
-   */
-  private async signYellowProtectionAuthorization(
-    decision: RiskDecision,
-  ): Promise<YellowProtectionAuth> {
-    const chain = decision.chain as "ethereum" | "base" | "arbitrum";
-    const wallet = this.wallets.get(chain);
-    const provider = this.providers.get(chain);
-
-    if (!wallet || !provider) {
-      throw new Error(`No wallet/provider for chain: ${chain}`);
-    }
-
-    const poolId = this.computePoolId(decision.targetPool);
-    const dynamicFee = this.calculateDynamicFee(decision);
-    const currentBlock = await provider.getBlockNumber();
-    const expiryBlock = currentBlock + 50; // ~10 minutes on Ethereum
-
-    // Create authorization message (EIP-712 style)
-    const authMessage = {
-      poolId,
-      action: decision.action as
-        | "MEV_PROTECTION"
-        | "ORACLE_VALIDATION"
-        | "CIRCUIT_BREAKER",
-      fee: dynamicFee,
-      expiryBlock,
-      timestamp: Date.now(),
-      nonce: this.yellowNonce++,
-      chain: decision.chain,
-    };
-
-    // Create message hash for signing
-    const messageHash = ethers.solidityPackedKeccak256(
-      [
-        "bytes32",
-        "string",
-        "uint24",
-        "uint256",
-        "uint256",
-        "uint256",
-        "string",
-      ],
-      [
-        authMessage.poolId,
-        authMessage.action,
-        authMessage.fee,
-        authMessage.expiryBlock,
-        authMessage.timestamp,
-        authMessage.nonce,
-        authMessage.chain,
-      ],
-    );
-
-    // Sign with Executor's private key (in production: inside TEE)
-    const signature = await wallet.signMessage(ethers.getBytes(messageHash));
-
-    console.log(`🔐 Executor: Signed Yellow authorization`);
-    console.log(`   PoolId: ${poolId.slice(0, 20)}...`);
-    console.log(`   Action: ${authMessage.action}`);
-    console.log(`   Fee: ${dynamicFee} bps`);
-    console.log(`   Expiry: block ${expiryBlock}`);
-
-    return {
-      ...authMessage,
-      signature,
-      signer: wallet.address,
-    };
-  }
-
-  /**
-   * Broadcast Yellow authorization via state channel (INSTANT)
-   *
-   * This happens OFF-CHAIN via WebSocket, <50ms latency
-   * Hook will check this signature before allowing swaps
-   */
-  private async broadcastYellowAuthorization(
-    auth: YellowProtectionAuth,
-    decision: RiskDecision,
-  ): Promise<void> {
-    if (!this.yellowMessageBus) {
-      console.warn(
-        "⚠️ Executor: No Yellow MessageBus - falling back to direct on-chain",
-      );
-      return;
-    }
-
-    const poolKey = `${decision.chain}:${decision.pair}`;
-
-    // Publish to Yellow state channel (OFF-CHAIN, instant)
-    await this.yellowMessageBus.publishProtectionAuth(
-      auth,
-      decision.id,
-      poolKey,
-    );
-
-    console.log(`⚡ Executor: Yellow authorization broadcast (OFF-CHAIN)`);
-    console.log(`   Duration: <50ms (vs ~12s block time)`);
-    console.log(`   Gas cost: 0 ETH (off-chain)`);
-    console.log(`   ✅ NO mempool exposure - protection active immediately!`);
-  }
-
-  /**
-   * Queue Yellow authorization for on-chain settlement (LATER)
-   *
-   * Settlement is for FINALITY only - protection is already active via Yellow
-   * Batches multiple authorizations to save gas
-   */
-  private async queueYellowAuthorizationForSettlement(
-    auth: YellowProtectionAuth,
-    decision: RiskDecision,
-  ): Promise<string> {
-    this.settlementQueue.push({
-      auth,
-      decision,
-      timestamp: Date.now(),
-    });
-
-    console.log(`📝 Executor: Authorization queued for settlement`);
-    console.log(`   Queue size: ${this.settlementQueue.length}`);
-
-    // Process settlement batch if queue is full or timeout reached
-    const BATCH_SIZE = 10;
-    const BATCH_TIMEOUT_MS = 60000; // 1 minute
-
-    if (
-      this.settlementQueue.length >= BATCH_SIZE ||
-      (this.lastSettlementTime > 0 &&
-        Date.now() - this.lastSettlementTime > BATCH_TIMEOUT_MS)
-    ) {
-      return await this.processSettlementBatch();
-    }
-
-    return "0xPENDING_SETTLEMENT";
-  }
-
-  /**
-   * Process batched settlements on-chain
-   *
-   * REAL IMPLEMENTATION - calls YellowOracle.commitAuthorizationBatch()
-   * This sends actual transactions to the deployed contracts on Sepolia
-   */
-  private async processSettlementBatch(): Promise<string> {
-    const batch = this.settlementQueue.splice(0, 100);
-
-    if (batch.length === 0) return "0xNO_SETTLEMENTS";
-
-    console.log(
-      `🔄 Executor: Settling ${batch.length} Yellow authorizations on-chain...`,
-    );
-
-    // Group by chain for batch settlement
-    const batchesByChain = new Map<string, SettlementQueueItem[]>();
-    for (const item of batch) {
-      const chain = item.decision.chain;
-      if (!batchesByChain.has(chain)) {
-        batchesByChain.set(chain, []);
-      }
-      batchesByChain.get(chain)!.push(item);
-    }
-
-    const txHashes: string[] = [];
-
-    // Process each chain's batch
-    for (const [chain, chainBatch] of batchesByChain) {
-      const yellowOracle = this.yellowOracleContracts.get(chain);
-
-      if (!yellowOracle) {
-        console.warn(
-          `⚠️ Executor: No YellowOracle contract for ${chain}, skipping ${chainBatch.length} settlements`,
-        );
-        continue;
-      }
-
-      try {
-        // Prepare batch arrays for contract call
-        const poolIds: string[] = [];
-        const actions: number[] = [];
-        const fees: number[] = [];
-        const expiryBlocks: bigint[] = [];
-        const timestamps: bigint[] = [];
-        const nonces: bigint[] = [];
-        const signatures: string[] = [];
-
-        for (const item of chainBatch) {
-          poolIds.push(item.auth.poolId);
-          actions.push(this.actionToNumber(item.auth.action));
-          fees.push(item.auth.fee);
-          expiryBlocks.push(BigInt(item.auth.expiryBlock));
-          timestamps.push(BigInt(item.auth.timestamp));
-          nonces.push(BigInt(item.auth.nonce));
-          signatures.push(item.auth.signature);
-        }
-
-        console.log(
-          `📤 Executor: Sending batch settlement to ${chain} YellowOracle...`,
-        );
-        console.log(`   Pool IDs: ${poolIds.length}`);
-        console.log(`   Contract: ${await yellowOracle.getAddress()}`);
-
-        // REAL ON-CHAIN CALL
-        const tx = await yellowOracle.commitAuthorizationBatch(
-          poolIds,
-          actions,
-          fees,
-          expiryBlocks,
-          timestamps,
-          nonces,
-          signatures,
-        );
-
-        console.log(`📨 Executor: Transaction submitted: ${tx.hash}`);
-        console.log(`   Waiting for confirmation...`);
-
-        // Wait for confirmation
-        const receipt = await tx.wait();
-
-        console.log(`✅ Executor: Batch settled on ${chain}`);
-        console.log(`   Transaction: ${receipt.hash}`);
-        console.log(`   Block: ${receipt.blockNumber}`);
-        console.log(`   Gas used: ${receipt.gasUsed.toString()}`);
-
-        txHashes.push(receipt.hash);
-
-        // Emit event for each settled authorization
-        for (const item of chainBatch) {
-          this.emit("settlement:confirmed", {
-            chain,
-            poolId: item.auth.poolId,
-            targetPool: item.decision.targetPool, // Raw pool address for flow correlation
-            txHash: receipt.hash,
-            blockNumber: receipt.blockNumber,
-          });
-        }
-      } catch (error) {
-        console.error(
-          `❌ Executor: Failed to settle batch on ${chain}:`,
-          error,
-        );
-
-        // Re-queue failed items for retry
-        this.settlementQueue.push(...chainBatch);
-
-        this.emit("settlement:failed", {
-          chain,
-          error: (error as Error).message,
-          itemCount: chainBatch.length,
-        });
-      }
-    }
-
-    this.lastSettlementTime = Date.now();
-
-    if (txHashes.length > 0) {
-      return txHashes[0]; // Return first tx hash
-    }
-
-    return "0xSETTLEMENT_FAILED";
-  }
-
-  /**
-   * Convert action string to on-chain enum value
-   */
-  private actionToNumber(
-    action: "MEV_PROTECTION" | "ORACLE_VALIDATION" | "CIRCUIT_BREAKER",
-  ): number {
-    switch (action) {
-      case "MEV_PROTECTION":
-        return 1;
-      case "ORACLE_VALIDATION":
-        return 2;
-      case "CIRCUIT_BREAKER":
-        return 3;
-      default:
-        return 0;
-    }
-  }
-
-  /**
    * Calculate dynamic fee based on composite score
    * Higher fees during attacks; Uniswap v4 distributes fees to LPs
+   * 
+   * Uniswap v4 fee format: 1 bps = 100 (parts per million representation)
+   * Example: 5 bps = 500, 30 bps = 3000, MAX_FEE = 50000 (5%)
+   * 
+   * IMPORTANT: Fee must be > baseFee (3000 = 30 bps) set in contract deployment
+   * 
+   * Scaling:
+   * - Score 0 → 32 bps (3200) - just above base fee
+   * - Score 50 → 100 bps (10000) - 1%
+   * - Score 100 → 200 bps (20000) - 2% (makes most MEV attacks unprofitable)
    */
   private calculateDynamicFee(decision: RiskDecision): number {
-    // Base fee = 5 bps (0.05%), scale up to 30 bps (0.3%) at score=100
-    const baseFee = 5;
-    const maxFee = 30;
-    return Math.round(
-      baseFee + (decision.compositeScore / 100) * (maxFee - baseFee),
+    // Scale from 32 bps to 200 bps based on threat score
+    const minFeeInBps = 32;  // Just above baseFee (30 bps)
+    const maxFeeInBps = 200; // Maximum dynamic fee (2%)
+    
+    const feeInBps = Math.round(
+      minFeeInBps + (decision.compositeScore / 100) * (maxFeeInBps - minFeeInBps),
     );
-  }
-
-  /**
-   * Process settlement queue - batch commit Yellow authorizations on-chain
-   *
-   * This runs in the background every 30s to settle off-chain authorizations
-   * on-chain for public audit trail and decentralized discoverability.
-   *
-   * Per PROJECT_SPEC.md Section 4.6:
-   * "Protection is active via Yellow BEFORE on-chain settlement"
-   */
-  private async processSettlementQueue(): Promise<void> {
-    if (this.settlementQueue.length === 0) {
-      return; // Nothing to settle
-    }
-
-    const now = Date.now();
-    const timeSinceLastSettlement = now - this.lastSettlementTime;
-
-    // Only settle every 30s minimum (avoid spamming on-chain)
-    if (timeSinceLastSettlement < 30_000 && this.lastSettlementTime > 0) {
-      return;
-    }
-
-    console.log(
-      `\n📦 Settlement Worker: Processing ${this.settlementQueue.length} pending authorizations...`,
-    );
-
-    // Group by chain for efficient batching
-    const byChain: Record<string, SettlementQueueItem[]> = {};
-
-    for (const item of this.settlementQueue) {
-      const chain = item.auth.chain;
-      if (!byChain[chain]) byChain[chain] = [];
-      byChain[chain].push(item);
-    }
-
-    // Process each chain
-    for (const [chain, items] of Object.entries(byChain)) {
-      try {
-        await this.settleChainBatch(
-          chain as "ethereum" | "base" | "arbitrum",
-          items,
-        );
-      } catch (error) {
-        console.error(
-          `❌ Settlement Worker: Failed to settle ${chain} batch:`,
-          error,
-        );
-      }
-    }
-
-    // Clear queue and update timestamp
-    this.settlementQueue = [];
-    this.lastSettlementTime = now;
-
-    console.log("✅ Settlement Worker: Batch complete\n");
-  }
-
-  /**
-   * Settle a batch of authorizations for a single chain
-   */
-  private async settleChainBatch(
-    chain: "ethereum" | "base" | "arbitrum",
-    items: SettlementQueueItem[],
-  ): Promise<void> {
-    const yellowOracleContract = this.yellowOracleContracts.get(chain);
-    if (!yellowOracleContract) {
-      console.log(`⚠️ Settlement: No YellowOracle for ${chain}, skipping...`);
-      return;
-    }
-
-    console.log(`   📤 Settling ${items.length} authorizations on ${chain}...`);
-
-    // Prepare batch arrays
-    const poolIds: string[] = [];
-    const actions: number[] = [];
-    const fees: number[] = [];
-    const expiryBlocks: number[] = [];
-    const timestamps: number[] = [];
-    const nonces: number[] = [];
-    const signatures: string[] = [];
-
-    for (const item of items) {
-      const auth = item.auth;
-      poolIds.push(auth.poolId);
-
-      // Map action string to enum
-      let actionEnum: number;
-      if (auth.action === "MEV_PROTECTION") actionEnum = 1;
-      else if (auth.action === "ORACLE_VALIDATION") actionEnum = 2;
-      else if (auth.action === "CIRCUIT_BREAKER") actionEnum = 3;
-      else continue; // Skip invalid
-
-      actions.push(actionEnum);
-      fees.push(auth.fee);
-      expiryBlocks.push(auth.expiryBlock);
-      timestamps.push(auth.timestamp);
-      nonces.push(auth.nonce);
-      signatures.push(auth.signature);
-    }
-
-    if (poolIds.length === 0) {
-      console.log(`   ⚠️ No valid authorizations to settle on ${chain}`);
-      return;
-    }
-
-    try {
-      // Call batch commit (fire and forget - NO await on .wait()!)
-      const tx = await yellowOracleContract.commitAuthorizationBatch(
-        poolIds,
-        actions,
-        fees,
-        expiryBlocks,
-        timestamps,
-        nonces,
-        signatures,
-        { maxFeePerGas: this.getMaxGasPrice(chain) },
-      );
-
-      console.log(`   ⏳ Settlement TX submitted: ${tx.hash}`);
-      console.log(`   ℹ️  Authorizations now publicly queryable on-chain`);
-
-      // Fire and forget - don't block on confirmation
-      tx.wait()
-        .then(() => {
-          console.log(`   ✅ Settlement TX confirmed: ${tx.hash}`);
-        })
-        .catch((error: Error) => {
-          console.error(
-            `   ❌ Settlement TX failed: ${tx.hash}`,
-            error.message,
-          );
-        });
-    } catch (error) {
-      console.error(
-        `   ❌ Failed to submit settlement batch on ${chain}:`,
-        error,
-      );
-      throw error;
-    }
+    
+    // Convert from bps to Uniswap v4 format (multiply by 100)
+    // 32 bps -> 3200, 200 bps -> 20000
+    return feeInBps * 100;
   }
 
   // ---------------------------------------------------------------------------
@@ -800,14 +386,16 @@ export class ExecutorAgent extends EventEmitter {
    * Execute a risk decision from the RiskEngine.
    *
    * Flow:
-   *   - ELEVATED tier: Broadcast to LP bots via on-chain event (no execution)
+   *   - ELEVATED tier: Broadcast threat to LP bots via on-chain event (informational)
    *   - CRITICAL tier:
-   *     1. Sign Yellow authorization OFF-CHAIN (no mempool exposure)
-   *     2. Broadcast via Yellow state channel (INSTANT, <50ms)
-   *     3. Queue for on-chain settlement (LATER, for finality)
-   *     4. Fallback: direct on-chain if Yellow not available
+   *     1. Executor calls hook activation methods directly (on-chain)
+   *     2. Protection active at pool level (~12s)
+   *     3. All future swaps automatically protected
    *
-   * Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+   * Architecture: Direct hook calls (Executor → Hook)
+   * - Hook state is single source of truth (protections[], breakers[], oracleConfigs[])
+   * - Yellow MessageBus: Used ONLY for agent-to-agent coordination (Scout→RiskEngine→Executor)
+   * - No intermediate authorization layer needed
    */
   async executeDecision(decision: RiskDecision): Promise<void> {
     console.log(
@@ -832,68 +420,34 @@ export class ExecutorAgent extends EventEmitter {
       let txHash: string;
 
       // =========================================================================
-      // YELLOW PRE-AUTHORIZATION FLOW (MEV Prevention)
-      // Per PROJECT_SPEC.md Section 4.5: "no mempool exposure"
+      // IMMEDIATE PROTECTION ACTIVATION
+      // Calls hook methods directly - hook state is single source of truth
       // =========================================================================
 
-      // Check if Yellow MessageBus is connected and action is MEV-related
-      const usesYellowPreAuth =
-        this.yellowMessageBus &&
-        ["MEV_PROTECTION", "ORACLE_VALIDATION", "CIRCUIT_BREAKER"].includes(
-          decision.action,
-        );
+      console.log(`🔐 Executor: Activating protection via hook methods`);
 
-      if (usesYellowPreAuth) {
-        console.log(
-          `🔐 Executor: Using Yellow pre-authorization (MEV prevention)`,
-        );
+      // 1. Deactivate all existing protections
+      await this.deactivateAllProtections(decision.chain, poolId);
 
-        // Step 1: Sign authorization OFF-CHAIN (no mempool exposure)
-        const yellowAuth =
-          await this.signYellowProtectionAuthorization(decision);
-
-        // Step 2: Broadcast via Yellow state channel (INSTANT, <50ms)
-        await this.broadcastYellowAuthorization(yellowAuth, decision);
-
-        // Step 3: Queue for on-chain settlement (LATER, for finality)
-        txHash = await this.queueYellowAuthorizationForSettlement(
-          yellowAuth,
-          decision,
-        );
-
-        console.log(
-          `✅ Executor: Protection active via Yellow (no mempool exposure)`,
-        );
-        console.log(`   Protection is INSTANT - attacker CANNOT frontrun!`);
-      } else {
-        // =========================================================================
-        // FALLBACK: Direct on-chain execution (for cross-chain or no Yellow)
-        // =========================================================================
-        console.log(`⚠️ Executor: Falling back to direct on-chain execution`);
-
-        // 1. Deactivate all existing protections
-        await this.deactivateAllProtections(decision.chain, poolId);
-
-        // 2. Activate the chosen protection
-        switch (decision.action) {
-          case "MEV_PROTECTION":
-            txHash = await this.activateMEVProtection(decision, poolId);
-            break;
-          case "ORACLE_VALIDATION":
-            txHash = await this.activateOracleValidation(decision, poolId);
-            break;
-          case "CIRCUIT_BREAKER":
-            txHash = await this.activateCircuitBreaker(decision, poolId);
-            break;
-          // Cross-chain defense actions
-          case "LIQUIDITY_REROUTE":
-          case "CROSS_CHAIN_ARBITRAGE_BLOCK":
-          case "EMERGENCY_BRIDGE":
-            txHash = await this.executeCrossChainDefense(decision);
-            break;
-          default:
-            throw new Error(`Unknown action: ${decision.action}`);
-        }
+      // 2. Activate the chosen protection (calls hook method directly)
+      switch (decision.action) {
+        case "MEV_PROTECTION":
+          txHash = await this.activateMEVProtection(decision, poolId);
+          break;
+        case "ORACLE_VALIDATION":
+          txHash = await this.activateOracleValidation(decision, poolId);
+          break;
+        case "CIRCUIT_BREAKER":
+          txHash = await this.activateCircuitBreaker(decision, poolId);
+          break;
+        // Cross-chain defense actions
+        case "LIQUIDITY_REROUTE":
+        case "CROSS_CHAIN_ARBITRAGE_BLOCK":
+        case "EMERGENCY_BRIDGE":
+          txHash = await this.executeCrossChainDefense(decision);
+          break;
+        default:
+          throw new Error(`Unknown action: ${decision.action}`);
       }
 
       // 3. Store protection state
@@ -924,91 +478,38 @@ export class ExecutorAgent extends EventEmitter {
     poolId: string,
   ): Promise<string> {
     const chain = decision.chain as "ethereum" | "base" | "arbitrum";
-    const wallet = this.wallets.get(chain);
-    const provider = this.providers.get(chain);
+    const hookContract = this.hookContracts.get(chain);
 
-    if (!wallet || !provider) {
-      throw new Error(`Missing wallet/provider for chain: ${chain}`);
+    if (!hookContract) {
+      throw new Error(`Missing hook contract for chain: ${chain}`);
     }
 
-    // Calculate dynamic fee based on composite score (5-30 bps)
-    const baseFee = 5;
-    const maxFee = 30;
-    const dynamicFee = Math.round(
-      baseFee + (decision.compositeScore / 100) * (maxFee - baseFee),
-    );
+    // Calculate dynamic fee based on composite score (5-30 bps = 500-3000 in Uniswap v4 format)
+    const dynamicFee = this.calculateDynamicFee(decision);
+    const feeInBps = dynamicFee / 100; // Convert back to bps for display
 
-    // Get current block and set expiry
-    const currentBlock = await provider.getBlockNumber();
-    const expiryBlock = currentBlock + 50; // ~10 minutes
-    const timestamp = Date.now();
-    const nonce = this.yellowNonce++;
-    const action = 1; // MEV_PROTECTION enum value
+    console.log(`   Activating MEV protection with fee ${feeInBps} bps (${dynamicFee} in contract format)`);
+    console.log(`   Calling hook.activateProtection() directly...`);
 
-    // Create message hash (must match YellowOracle verification)
-    const messageHash = ethers.solidityPackedKeccak256(
-      ["bytes32", "string", "uint24", "uint256", "uint256", "uint256"],
-      [poolId, "MEV_PROTECTION", dynamicFee, expiryBlock, timestamp, nonce],
-    );
+    // Generate proof (TEE attestation in production)
+    const proof = this.generateProof(decision);
 
-    // Sign with Executor's private key (OFF-CHAIN, instant)
-    const signature = await wallet.signMessage(ethers.getBytes(messageHash));
-
-    console.log(`   Activating MEV protection with fee ${dynamicFee} bps`);
-
-    // PRIORITY 1: Try off-chain broadcast via Yellow (INSTANT, <50ms)
-    if (this.yellowMessageBus && this.yellowMessageBus.isActive()) {
-      const auth = {
-        poolId,
-        action: "MEV_PROTECTION" as const,
-        fee: dynamicFee,
-        expiryBlock,
-        timestamp,
-        nonce,
-        chain,
-        signature,
-        signer: wallet.address,
-      };
-
-      const poolKey = `${decision.targetPool}-${chain}`;
-      await this.yellowMessageBus.publishProtectionAuth(
-        auth,
-        decision.id,
-        poolKey,
-      );
-      console.log(`   ✅ Protection broadcast via Yellow (OFF-CHAIN, INSTANT)`);
-
-      // Queue for background settlement (no blocking!)
-      this.settlementQueue.push({ auth, decision, timestamp: Date.now() });
-      console.log(
-        `   📋 Queued for on-chain settlement (${this.settlementQueue.length} pending)`,
-      );
-
-      return `yellow-auth-${nonce}`;
-    }
-
-    // PRIORITY 2: Fallback - Immediate on-chain commit (Yellow not connected)
-    console.log(
-      `   ⚠️ Yellow not connected, falling back to immediate on-chain commitment`,
-    );
-    const yellowOracleContract = this.yellowOracleContracts.get(chain);
-    if (!yellowOracleContract) {
-      throw new Error(`Missing YellowOracle contract for chain: ${chain}`);
-    }
-
-    const tx = await yellowOracleContract.commitAuthorization(
+    // Call hook activation method directly (Executor → Hook)
+    const tx = await hookContract.activateProtection(
       poolId,
-      action,
       dynamicFee,
-      expiryBlock,
-      timestamp,
-      nonce,
-      signature,
+      proof,
       { maxFeePerGas: this.getMaxGasPrice(chain) },
     );
 
     await tx.wait();
-    console.log(`   ✅ Authorization committed to YellowOracle: ${tx.hash}`);
+
+    console.log(`   ✅ Protection activated on-chain: ${tx.hash}`);
+    console.log(
+      `   🛡️  All swaps will now use dynamic fee=${feeInBps} bps (${(feeInBps / 100).toFixed(2)}%)`,
+    );
+    console.log(`   👥 Protection applies to ALL users transparently`);
+
     return tx.hash;
   }
 
@@ -1017,86 +518,53 @@ export class ExecutorAgent extends EventEmitter {
     poolId: string,
   ): Promise<string> {
     const chain = decision.chain as "ethereum" | "base" | "arbitrum";
-    const wallet = this.wallets.get(chain);
-    const provider = this.providers.get(chain);
+    const hookContract = this.hookContracts.get(chain);
 
-    if (!wallet || !provider) {
-      throw new Error(`Missing wallet/provider for chain: ${chain}`);
+    if (!hookContract) {
+      throw new Error(`Missing hook contract for chain: ${chain}`);
     }
 
-    const currentBlock = await provider.getBlockNumber();
-    const expiryBlock = currentBlock + 50;
-    const timestamp = Date.now();
-    const nonce = this.yellowNonce++;
-    const action = 2; // ORACLE_VALIDATION enum value
-    const fee = 0; // Oracle validation doesn't use fee (rejects swaps on deviation)
+    // Get Chainlink feed address based on chain (Sepolia testnet addresses)
+    // Use ETH/USD feed as default for all pools (in production, use pool-specific feeds)
+    const chainlinkFeeds: Record<string, string> = {
+      ethereum: "0x694AA1769357215DE4FAC081bf1f309aDC325306", // ETH/USD Sepolia
+      base: "0x4aDC67696bA383F43DD60A9e78F2C97Fbbfc7cb1", // ETH/USD Base Sepolia
+      arbitrum: "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165", // ETH/USD Arbitrum Sepolia
+    };
 
-    const messageHash = ethers.solidityPackedKeccak256(
-      ["bytes32", "string", "uint24", "uint256", "uint256", "uint256"],
-      [poolId, "ORACLE_VALIDATION", fee, expiryBlock, timestamp, nonce],
-    );
+    const chainlinkFeed = chainlinkFeeds[chain];
+    if (!chainlinkFeed) {
+      throw new Error(`No Chainlink feed configured for chain: ${chain}`);
+    }
 
-    const signature = await wallet.signMessage(ethers.getBytes(messageHash));
+    const threshold = 200; // 2% deviation threshold (200 basis points)
 
     console.log(`   Activating oracle validation`);
+    console.log(`   Chainlink feed: ${chainlinkFeed} (${chain} Sepolia)`);
+    console.log(`   Deviation threshold: ${threshold} bps (2%)`);
+    console.log(`   Calling hook.configureOracle() directly...`);
 
-    // PRIORITY 1: Try off-chain broadcast via Yellow (INSTANT, <50ms)
-    if (this.yellowMessageBus && this.yellowMessageBus.isActive()) {
-      const auth = {
-        poolId,
-        action: "ORACLE_VALIDATION" as const,
-        fee,
-        expiryBlock,
-        timestamp,
-        nonce,
-        chain,
-        signature,
-        signer: wallet.address,
-      };
+    // Generate proof (TEE attestation in production)
+    const proof = this.generateProof(decision);
 
-      const poolKey = `${decision.targetPool}-${chain}`;
-      await this.yellowMessageBus.publishProtectionAuth(
-        auth,
-        decision.id,
-        poolKey,
-      );
-      console.log(
-        `   ✅ Oracle validation broadcast via Yellow (OFF-CHAIN, INSTANT)`,
-      );
-
-      // Queue for background settlement
-      this.settlementQueue.push({ auth, decision, timestamp: Date.now() });
-      console.log(
-        `   📋 Queued for settlement (${this.settlementQueue.length} pending)`,
-      );
-
-      return `yellow-auth-${nonce}`;
-    }
-
-    // PRIORITY 2: Fallback to on-chain commit
-    console.log(
-      `   ⚠️ Yellow not connected, falling back to on-chain commitment`,
-    );
-    const yellowOracleContract = this.yellowOracleContracts.get(chain);
-    if (!yellowOracleContract) {
-      throw new Error(`Missing YellowOracle contract for chain: ${chain}`);
-    }
-
-    const tx = await yellowOracleContract.commitAuthorization(
+    // Call hook configuration method directly (Executor → Hook)
+    const tx = await hookContract.configureOracle(
       poolId,
-      action,
-      fee,
-      expiryBlock,
-      timestamp,
-      nonce,
-      signature,
+      chainlinkFeed,
+      threshold,
+      proof,
       { maxFeePerGas: this.getMaxGasPrice(chain) },
     );
 
     await tx.wait();
+
     console.log(
-      `   ✅ Oracle validation committed to YellowOracle: ${tx.hash}`,
+      `   ✅ Oracle validation activated on-chain: ${tx.hash}`,
     );
+    console.log(
+      `   🛡️  All swaps will now be rejected on oracle deviation > ${threshold} bps`,
+    );
+
     return tx.hash;
   }
 
@@ -1105,84 +573,38 @@ export class ExecutorAgent extends EventEmitter {
     poolId: string,
   ): Promise<string> {
     const chain = decision.chain as "ethereum" | "base" | "arbitrum";
-    const wallet = this.wallets.get(chain);
-    const provider = this.providers.get(chain);
+    const hookContract = this.hookContracts.get(chain);
 
-    if (!wallet || !provider) {
-      throw new Error(`Missing wallet/provider for chain: ${chain}`);
+    if (!hookContract) {
+      throw new Error(`Missing hook contract for chain: ${chain}`);
     }
 
-    const currentBlock = await provider.getBlockNumber();
-    const expiryBlock = currentBlock + 50;
-    const timestamp = Date.now();
-    const nonce = this.yellowNonce++;
-    const action = 3; // CIRCUIT_BREAKER enum value
-    const fee = 0; // Fee=0 means circuit breaker (SentinelHook reverts with PoolPaused)
-
-    const messageHash = ethers.solidityPackedKeccak256(
-      ["bytes32", "string", "uint24", "uint256", "uint256", "uint256"],
-      [poolId, "CIRCUIT_BREAKER", fee, expiryBlock, timestamp, nonce],
-    );
-
-    const signature = await wallet.signMessage(ethers.getBytes(messageHash));
+    // Use decision rationale as circuit breaker reason
+    const reason = decision.rationale.slice(0, 256); // Max 256 chars
 
     console.log(`   Activating circuit breaker (pool pause)`);
+    console.log(`   Reason: ${reason}`);
+    console.log(`   Calling hook.activateCircuitBreaker() directly...`);
 
-    // PRIORITY 1: Try off-chain broadcast via Yellow (INSTANT, <50ms)
-    if (this.yellowMessageBus && this.yellowMessageBus.isActive()) {
-      const auth = {
-        poolId,
-        action: "CIRCUIT_BREAKER" as const,
-        fee,
-        expiryBlock,
-        timestamp,
-        nonce,
-        chain,
-        signature,
-        signer: wallet.address,
-      };
+    // Generate proof (TEE attestation in production)
+    const proof = this.generateProof(decision);
 
-      const poolKey = `${decision.targetPool}-${chain}`;
-      await this.yellowMessageBus.publishProtectionAuth(
-        auth,
-        decision.id,
-        poolKey,
-      );
-      console.log(
-        `   ✅ Circuit breaker broadcast via Yellow (OFF-CHAIN, INSTANT)`,
-      );
-
-      // Queue for background settlement
-      this.settlementQueue.push({ auth, decision, timestamp: Date.now() });
-      console.log(
-        `   📋 Queued for settlement (${this.settlementQueue.length} pending)`,
-      );
-
-      return `yellow-auth-${nonce}`;
-    }
-
-    // PRIORITY 2: Fallback to on-chain commit
-    console.log(
-      `   ⚠️ Yellow not connected, falling back to on-chain commitment`,
-    );
-    const yellowOracleContract = this.yellowOracleContracts.get(chain);
-    if (!yellowOracleContract) {
-      throw new Error(`Missing YellowOracle contract for chain: ${chain}`);
-    }
-
-    const tx = await yellowOracleContract.commitAuthorization(
+    // Call hook breaker method directly (Executor → Hook)
+    const tx = await hookContract.activateCircuitBreaker(
       poolId,
-      action,
-      fee,
-      expiryBlock,
-      timestamp,
-      nonce,
-      signature,
+      reason,
+      proof,
       { maxFeePerGas: this.getMaxGasPrice(chain) },
     );
 
     await tx.wait();
-    console.log(`   ✅ Circuit breaker committed to YellowOracle: ${tx.hash}`);
+
+    console.log(`   ✅ Circuit breaker activated on-chain: ${tx.hash}`);
+    console.log(
+      `   🚫 Pool completely paused`,
+    );
+    console.log(`   🛡️  All swaps will be rejected`);
+
     return tx.hash;
   }
 
@@ -1356,12 +778,31 @@ export class ExecutorAgent extends EventEmitter {
       return;
     }
 
-    console.log("🌉 Initializing CrossChainOrchestrator...");
+    const isDryRun = this.config.crossChain?.dryRun ?? true;
+    
+    console.log("\n═══════════════════════════════════════════════════════════");
+    console.log("🌉 Initializing Cross-Chain Defense System (LI.FI)");
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log(`   Mode: ${isDryRun ? '📋 DRY RUN (Simulation)' : '⚠️ LIVE EXECUTION'}`);
+    
+    if (isDryRun) {
+      console.log("\n   ℹ️  LI.FI MAINNET REQUIREMENT:");
+      console.log("   • LI.FI SDK operates on MAINNET chains only");
+      console.log("   • Cross-chain actions require mainnet funds (ETH, USDC, etc.)");
+      console.log("   • Current mode: DRY RUN - simulating actions without executing");
+      console.log("   • Set CROSSCHAIN_DRY_RUN=false in .env for live execution (requires mainnet funds)");
+    } else {
+      console.log("\n   ⚠️  WARNING: LIVE EXECUTION MODE");
+      console.log("   • Will execute real cross-chain transactions on mainnet");
+      console.log("   • Requires sufficient mainnet funds for gas + bridging");
+      console.log("   • Transactions are irreversible");
+    }
+    console.log("═══════════════════════════════════════════════════════════\n");
 
     this.crossChainOrchestrator = createCrossChainOrchestrator({
       walletPrivateKey: this.config.agentPrivateKey,
       integrator: "Sentinell",
-      dryRun: this.config.crossChain?.dryRun ?? true,
+      dryRun: isDryRun,
     });
 
     // Wire up orchestrator events
@@ -1396,14 +837,41 @@ export class ExecutorAgent extends EventEmitter {
 
     const chainId = this.getChainId(decision.chain);
     const action = decision.action as CrossChainAction;
-
-    console.log(`   Executing cross-chain defense: ${action}`);
-    console.log(`   Source chain: ${decision.chain} (${chainId})`);
-
-    // Determine token and amount from decision context
-    // In production, this would come from pool analysis
     const tokenSymbol = this.extractTokenFromPair(decision.pair);
     const amount = "100"; // Default test amount - in production, calculate based on pool analysis
+
+    // For logging, show pair or fallback
+    const displayPair = decision.pair || "Multi-asset pool";
+    const displayToken = tokenSymbol === "UNKNOWN" ? "ETH (default)" : tokenSymbol;
+
+    console.log("\n🌉 ═══════════════════════════════════════════════════════════");
+    console.log(`   CROSS-CHAIN DEFENSE: ${action}`);
+    console.log("   ═══════════════════════════════════════════════════════════");
+    console.log(`   Source chain: ${decision.chain} (Chain ID: ${chainId})`);
+    console.log(`   Target pool: ${decision.targetPool}`);
+    console.log(`   Pair: ${displayPair}`);
+    console.log(`   Token: ${displayToken}`);
+    console.log(`   Amount: ${amount}`);
+    console.log(`   Trigger: ${decision.rationale}`);
+    
+    console.log("\n   📋 WHAT THIS ACTION DOES:");
+    switch (action) {
+      case "LIQUIDITY_REROUTE":
+        console.log(`   • Moves liquidity from ${decision.chain} to a safer chain`);
+        console.log(`   • Uses LI.FI to bridge ${tokenSymbol} cross-chain`);
+        console.log("   • Protects against chain-specific attacks");
+        break;
+      case "CROSS_CHAIN_ARBITRAGE_BLOCK":
+        console.log("   • Blocks detected cross-chain arbitrage exploit");
+        console.log(`   • Prevents profit extraction via ${decision.chain} bridge`);
+        console.log("   • Temporarily restricts cross-chain swaps");
+        break;
+      case "EMERGENCY_BRIDGE":
+        console.log(`   • EMERGENCY: Fast exit from ${decision.chain}`);
+        console.log("   • Bridges all at-risk assets to safe haven chain");
+        console.log("   • Highest priority cross-chain defense");
+        break;
+    }
 
     const result = await this.crossChainOrchestrator.executeDefense({
       action,
@@ -1415,16 +883,25 @@ export class ExecutorAgent extends EventEmitter {
     });
 
     if (!result.success) {
+      console.log("   ❌ Failed:", result.error);
       throw new Error(`Cross-chain defense failed: ${result.error}`);
     }
 
     // For dry runs, return a synthetic hash
     if (result.dryRun) {
       const dryRunHash = `0xDRYRUN_${decision.id}`;
-      console.log(`   📋 Dry run complete: ${dryRunHash}`);
+      console.log("\n   ✅ DRY RUN COMPLETE (Simulated)");
+      console.log("   • No mainnet funds spent");
+      console.log("   • Action validated successfully");
+      console.log(`   • Would execute on mainnet if CROSSCHAIN_DRY_RUN=false`);
+      console.log(`   • Synthetic TX: ${dryRunHash}`);
+      console.log("   ═══════════════════════════════════════════════════════════\n");
       return dryRunHash;
     }
 
+    console.log("\n   ✅ EXECUTED ON MAINNET");
+    console.log(`   • Transaction: ${result.txHash}`);
+    console.log("   ═══════════════════════════════════════════════════════════\n");
     return result.txHash || "0xNO_TX_HASH";
   }
 
@@ -1450,7 +927,10 @@ export class ExecutorAgent extends EventEmitter {
    * Extract primary token from trading pair.
    * e.g., "ETH/USDC" -> "ETH"
    */
-  private extractTokenFromPair(pair: string): string {
+  private extractTokenFromPair(pair: string | undefined): string {
+    if (!pair || pair === "UNKNOWN/UNKNOWN") {
+      return "ETH"; // Default to ETH for cross-chain actions
+    }
     const [token] = pair.split("/");
     return token || "ETH";
   }

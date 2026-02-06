@@ -64,6 +64,15 @@ export interface YellowChannelState {
     signature: string;
     timestamp: number;
   } | null;
+  // Enhanced session info for demo
+  sessionBalance: string;          // e.g., "4.979 ytest.usd"
+  microFeesAccrued: string;        // e.g., "0.021 ytest.usd"
+  stateVersion: number;            // Current session version
+  totalActions: number;            // Total protection actions in session
+  sessionStartTime: number | null; // When session was created
+  networkMode: 'sandbox' | 'production';
+  agentAddress: string;            // Agent Ethereum address
+  sentinelAddress: string;         // SentinelHook contract address
 }
 
 /**
@@ -86,6 +95,7 @@ export interface E2EFlow {
   currentStage: FlowStage;
   settlementTxHash?: string; // Final on-chain settlement
   status: 'active' | 'completed' | 'failed';
+  executionId?: string; // Link to ExecutionEntry for tx hash updates
 }
 
 export interface DashboardSnapshot {
@@ -112,28 +122,28 @@ export interface DashboardSnapshot {
 export class DashboardState extends EventEmitter {
   private startTime: number;
   private status: 'running' | 'stopped' | 'error' = 'stopped';
-  
+
   // Data stores with limits
   private logs: DashboardLogEntry[] = [];
   private readonly MAX_LOGS = 200;
-  
+
   private executions: ExecutionEntry[] = [];
   private readonly MAX_EXECUTIONS = 100;
-  
+
   private gasHistory: GasDataPoint[] = [];
   private readonly MAX_GAS_POINTS = 50;
-  
+
   private priceHistory: PriceDataPoint[] = [];
   private readonly MAX_PRICE_POINTS = 100;
-  
+
   private hysteresisHistory: HysteresisState[] = [];
   private readonly MAX_HYSTERESIS_POINTS = 50;
-  
+
   // Current state
   private currentRiskScore = 0;
   private currentTier = 'WATCH';
   private contributingSignals = 0;
-  
+
   // Yellow channel state
   private yellowChannel: YellowChannelState = {
     connected: false,
@@ -141,6 +151,15 @@ export class DashboardState extends EventEmitter {
     messagesCount: 0,
     authorizationsCount: 0,
     lastSignature: null,
+    // Enhanced session info
+    sessionBalance: '0',
+    microFeesAccrued: '0',
+    stateVersion: 0,
+    totalActions: 0,
+    sessionStartTime: null,
+    networkMode: 'sandbox',
+    agentAddress: '',
+    sentinelAddress: '',
   };
 
   // E2E Flow Tracking
@@ -187,7 +206,7 @@ export class DashboardState extends EventEmitter {
     };
 
     this.logs.push(entry);
-    
+
     // Trim to max size
     if (this.logs.length > this.MAX_LOGS) {
       this.logs = this.logs.slice(-this.MAX_LOGS);
@@ -205,10 +224,40 @@ export class DashboardState extends EventEmitter {
   // ============================================================================
 
   ingestScoutSignal(signal: ScoutSignal): void {
-    this.addLog('SIGNAL', 'scout', `${signal.type} on ${signal.chain}`, {
+    // Create human-readable log message based on signal type
+    let message: string;
+    const mag = (signal.magnitude * 100).toFixed(1);
+    const chain = signal.chain.charAt(0).toUpperCase() + signal.chain.slice(1);
+
+    switch (signal.type) {
+      case 'FLASH_LOAN':
+        message = `💰 Flash Loan detected on ${chain} | ${signal.pair} | Magnitude: ${mag}%`;
+        break;
+      case 'GAS_SPIKE':
+        message = `⛽ Gas spike on ${chain} | ${signal.raw?.gasPrice ? (Number(signal.raw.gasPrice) / 1e9).toFixed(2) + ' gwei' : 'N/A'} | +${mag}% increase`;
+        break;
+      case 'LARGE_SWAP':
+        message = `🔄 Large swap on ${chain} | ${signal.pair} | Size: ${mag}% of pool`;
+        break;
+      case 'PRICE_MOVE':
+        message = `📈 Price movement on ${chain} | ${signal.pair} | ${signal.raw?.price ? '$' + Number(signal.raw.price).toFixed(4) : ''} | Change: ${mag}%`;
+        break;
+      case 'MEMPOOL_CLUSTER':
+        message = `🎯 Mempool cluster on ${chain} | ${signal.raw?.targetPool || signal.poolAddress || 'unknown pool'} | ${signal.raw?.count || 0} txs in ${signal.raw?.windowMs || 0}ms`;
+        break;
+      case 'CROSS_CHAIN_ATTACK':
+        message = `⚠️  Cross-chain pattern on ${chain} | ${signal.pair} | Threat: ${mag}%`;
+        break;
+      default:
+        message = `🔍 ${signal.type} on ${chain} | ${signal.pair} | Magnitude: ${mag}%`;
+    }
+
+    this.addLog('SIGNAL', 'scout', message, {
+      type: signal.type,
       pair: signal.pair,
       magnitude: signal.magnitude,
       poolAddress: signal.poolAddress,
+      chain: signal.chain,
     });
   }
 
@@ -228,7 +277,7 @@ export class DashboardState extends EventEmitter {
       score: decision.compositeScore,
       timestamp: Date.now(),
     };
-    
+
     this.hysteresisHistory.push(hysteresisEntry);
     if (this.hysteresisHistory.length > this.MAX_HYSTERESIS_POINTS) {
       this.hysteresisHistory = this.hysteresisHistory.slice(-this.MAX_HYSTERESIS_POINTS);
@@ -237,8 +286,8 @@ export class DashboardState extends EventEmitter {
     this.addLog(
       decision.tier === 'CRITICAL' ? 'ERROR' : decision.tier === 'ELEVATED' ? 'WARN' : 'INFO',
       'riskengine',
-      `Decision: ${decision.action} (${decision.tier}) Score: ${decision.compositeScore.toFixed(1)}`,
-      { action: decision.action, tier: decision.tier, score: decision.compositeScore }
+      `🛡️  Risk Engine: ${decision.action.toUpperCase()} | ${decision.tier} tier | Score: ${decision.compositeScore.toFixed(1)}/100 | Signals: ${decision.contributingSignals.length} | Pool: ${decision.targetPool.slice(0, 8)}...`,
+      { action: decision.action, tier: decision.tier, score: decision.compositeScore, pool: decision.targetPool }
     );
 
     this.emit('riskUpdate', { score: this.currentRiskScore, tier: this.currentTier });
@@ -270,7 +319,7 @@ export class DashboardState extends EventEmitter {
     status: 'pending' | 'success' | 'failed' = 'pending'
   ): string {
     const id = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+
     const entry: ExecutionEntry = {
       id,
       timestamp: Date.now(),
@@ -284,14 +333,16 @@ export class DashboardState extends EventEmitter {
     };
 
     this.executions.push(entry);
-    
+
     if (this.executions.length > this.MAX_EXECUTIONS) {
       this.executions = this.executions.slice(-this.MAX_EXECUTIONS);
     }
 
-    this.addLog('SUCCESS', 'executor', `Execution: ${action} on ${chain}`, {
+    this.addLog('SUCCESS', 'executor', `⚡ Executor: ${action.toUpperCase()} executed | Chain: ${chain.charAt(0).toUpperCase() + chain.slice(1)} | Pool: ${poolId.slice(0, 10)}... | Tx: ${txHash.slice(0, 10)}...`, {
       txHash,
       poolId,
+      action,
+      chain,
     });
 
     this.emit('execution', entry);
@@ -302,6 +353,33 @@ export class DashboardState extends EventEmitter {
     const exec = this.executions.find(e => e.id === id);
     if (exec) {
       exec.status = status;
+      this.emit('executionUpdate', exec);
+    }
+  }
+
+  /**
+   * Update execution tx hash (for settlement updates)
+   */
+  updateExecutionTxHash(id: string, txHash: string): void {
+    const exec = this.executions.find(e => e.id === id);
+    if (exec) {
+      exec.txHash = txHash;
+      exec.status = 'success';
+      this.emit('executionUpdate', exec);
+    }
+  }
+
+  /**
+   * Update execution tx hash by poolId (fallback lookup)
+   */
+  updateExecutionTxHashByPoolId(poolId: string, txHash: string): void {
+    // Find most recent execution for this pool
+    const exec = [...this.executions]
+      .reverse()
+      .find(e => e.poolId === poolId);
+    if (exec) {
+      exec.txHash = txHash;
+      exec.status = 'success';
       this.emit('executionUpdate', exec);
     }
   }
@@ -322,7 +400,7 @@ export class DashboardState extends EventEmitter {
     };
 
     this.gasHistory.push(point);
-    
+
     if (this.gasHistory.length > this.MAX_GAS_POINTS) {
       this.gasHistory = this.gasHistory.slice(-this.MAX_GAS_POINTS);
     }
@@ -350,7 +428,7 @@ export class DashboardState extends EventEmitter {
     };
 
     this.priceHistory.push(point);
-    
+
     if (this.priceHistory.length > this.MAX_PRICE_POINTS) {
       this.priceHistory = this.priceHistory.slice(-this.MAX_PRICE_POINTS);
     }
@@ -371,7 +449,7 @@ export class DashboardState extends EventEmitter {
 
   updateYellowChannel(updates: Partial<YellowChannelState>): void {
     this.yellowChannel = { ...this.yellowChannel, ...updates };
-    
+
     if (updates.connected !== undefined) {
       this.addLog(
         updates.connected ? 'SUCCESS' : 'WARN',
@@ -459,6 +537,16 @@ export class DashboardState extends EventEmitter {
   }
 
   /**
+   * Link E2E flow to an execution entry (for tx hash updates on settlement)
+   */
+  linkE2EFlowToExecution(flowId: string, executionId: string): void {
+    const flow = this.e2eFlows.get(flowId);
+    if (flow) {
+      flow.executionId = executionId;
+    }
+  }
+
+  /**
    * Complete E2E flow with settlement TX hash
    */
   completeE2EFlow(flowId: string, settlementTxHash: string): void {
@@ -473,6 +561,14 @@ export class DashboardState extends EventEmitter {
       data: { txHash: settlementTxHash },
     });
     flow.currentStage = 'settlement';
+
+    // Update linked execution entry tx hash if available
+    if (flow.executionId) {
+      this.updateExecutionTxHash(flow.executionId, settlementTxHash);
+    } else {
+      // Fallback: update by poolId
+      this.updateExecutionTxHashByPoolId(flow.poolId, settlementTxHash);
+    }
 
     this.emit('flowCompleted', flow);
   }

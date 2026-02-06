@@ -37,7 +37,7 @@ import type { ScoutSignal, ScoutSignalType } from "../../scout/src/types";
 export interface ValidatorThreatSignal {
   type: "ORACLE_MANIPULATION" | "CROSS_CHAIN_INCONSISTENCY";
   chain: string;
-  pair: string;
+  pair?: string; // Optional - will default to "UNKNOWN/UNKNOWN" if not provided
   poolAddress?: string;
   deviation: number; // percentage points
   timestamp: number;
@@ -350,22 +350,31 @@ class ThreatStateMachine {
 /**
  * Maps (tier, compositeScore, signalMix) → DefenseAction.
  *
- * The mapping is not a simple threshold table. It considers WHAT signals
- * contributed:
+ * The mapping prioritizes keeping the pool operational while protecting LPs:
  *
- *   • If ORACLE_MANIPULATION or CROSS_CHAIN_INCONSISTENCY is in the window
- *     with significant weight, the answer leans toward ORACLE_VALIDATION
- *     regardless of overall score — because oracle attacks need a different
- *     defence than sandwich attacks.
+ * STRATEGY:
+ *   • MEV_PROTECTION (dynamic fees): First line of defense for MEV attacks
+ *     - Sandwich, frontrun, JIT liquidity
+ *     - Toxic arbitrage: Moderate oracle deviation (<30%) + MEV patterns
+ *     - Scales fees 32-200 bps based on threat score (0.32%-2%)
+ *     - Higher fees make attacks unprofitable while benefiting LPs
+ *     - Keeps pool operational
  *
- *   • CIRCUIT_BREAKER is reserved for CRITICAL tier AND either:
- *       - oracle deviation is extreme (>3× base threshold), OR
- *       - 3+ distinct signal types correlate simultaneously.
- *     A single high score alone does NOT trigger circuit breaker.
- *     This prevents the nuclear option from firing on a single anomalous block.
+ *   • ORACLE_VALIDATION: For significant price manipulation (30-75% deviation)
+ *     - Rejects swaps when Chainlink/TWAP deviation exceeds threshold
+ *     - Prevents LP drainage from stale/manipulated prices
+ *     - Used when oracle is the primary attack vector
  *
- *   • MEV_PROTECTION is the default escalation for ELEVATED tier when the
- *     signal mix is dominated by mempool/gas/swap patterns.
+ *   • CIRCUIT_BREAKER: Nuclear option for catastrophic scenarios
+ *     - Extreme oracle deviation (>75%) that would definitely drain LPs, OR
+ *     - Multi-vector attack: oracle manipulation + 4+ correlated MEV signals
+ *     - Completely pauses the pool
+ *     - Use sparingly - loses trading fees and user experience
+ *
+ * SIGNAL INTERPRETATION:
+ *   • ORACLE_MANIPULATION / CROSS_CHAIN_INCONSISTENCY → Oracle validation
+ *   • FLASH_LOAN / GAS_SPIKE / LARGE_SWAP / MEMPOOL_CLUSTER → MEV protection
+ *   • CROSS_CHAIN_ATTACK → Cross-chain defenses (reroute, arbitrage block)
  */
 function mapToDefenseAction(
   tier: ThreatTier,
@@ -430,41 +439,80 @@ function mapToDefenseAction(
 
   // --- CRITICAL tier decision logic ---
   if (tier === "CRITICAL") {
-    // Circuit breaker requires EITHER extreme oracle deviation OR broad correlation.
-    // This is the "LPs would definitely be looted" gate.
+    // Circuit breaker is the NUCLEAR OPTION - use it sparingly.
+    // 
+    // Trigger CIRCUIT_BREAKER only when:
+    // 1. Extreme oracle deviation (>75%) that could drain LPs, OR
+    // 2. Catastrophic correlation: oracle manipulation + 3+ MEV signals simultaneously
+    //
+    // For pure MEV attacks (sandwich, frontrun, JIT, toxic arb), prefer dynamic
+    // fee increases (MEV_PROTECTION) to keep the pool operational while extracting
+    // value from attackers via higher fees that go to LPs.
+    
     const oracleDevSignal = signals.find(
       (s) => s.source === "ORACLE_MANIPULATION" || s.source === "CROSS_CHAIN_INCONSISTENCY"
     );
     const extremeOracle = oracleDevSignal && oracleDevSignal.magnitude > 0.75;
-    const broadCorrelation = distinctSignalCount >= 3;
+    const moderateOracle = oracleDevSignal && oracleDevSignal.magnitude > 0.05 && oracleDevSignal.magnitude <= 0.3;
+    
+    // Catastrophic correlation: oracle manipulation + multiple MEV patterns
+    // This suggests a coordinated, multi-vector attack
+    const catastrophicCorrelation = hasOracleSignal && distinctSignalCount >= 4 && hasMevSignals;
 
-    if (extremeOracle || broadCorrelation) {
+    if (extremeOracle || catastrophicCorrelation) {
       return {
         action: "CIRCUIT_BREAKER",
         rationale: extremeOracle
           ? `CRITICAL tier + extreme oracle deviation (magnitude ${oracleDevSignal!.magnitude.toFixed(2)}). Pool pause required to prevent LP drainage.`
-          : `CRITICAL tier + ${distinctSignalCount} correlated signal types within correlation window. Broad attack pattern detected — pool pause required.`,
+          : `CRITICAL tier + ${distinctSignalCount} correlated signal types with oracle manipulation. Catastrophic multi-vector attack detected — emergency pool pause.`,
       };
     }
 
-    // CRITICAL but doesn't meet circuit breaker gate → fall through to oracle or MEV
-    if (hasOracleSignal) {
+    // Toxic arbitrage detection: Moderate oracle deviation + strong MEV signals
+    // These are MEV attacks that cause incidental price impact, not pure oracle manipulation
+    // Example: Large swaps that move price slightly while extracting MEV
+    // Strategy: Use dynamic fees to make the attack unprofitable
+    if (moderateOracle && hasMevSignals) {
+      return {
+        action: "MEV_PROTECTION",
+        rationale: `CRITICAL tier toxic arbitrage detected (oracle magnitude ${oracleDevSignal!.magnitude.toFixed(2)}, score ${compositeScore.toFixed(1)}). Moderate price impact with MEV patterns — dynamic fees applied to extract value from attacker. Signal types: ${[...signalTypes].join(", ")}.`,
+      };
+    }
+
+    // CRITICAL with significant oracle deviation (30-75%) → Oracle validation
+    if (hasOracleSignal && !moderateOracle) {
       return {
         action: "ORACLE_VALIDATION",
-        rationale: `CRITICAL tier with oracle signal present (score ${compositeScore.toFixed(1)}). Oracle validation enforced; circuit breaker not triggered because deviation is not extreme and correlation is not broad enough.`,
+        rationale: `CRITICAL tier with oracle manipulation (magnitude ${oracleDevSignal?.magnitude.toFixed(2) || 'unknown'}, score ${compositeScore.toFixed(1)}). Oracle validation enforced; swaps will be rejected if price deviation exceeds threshold.`,
       };
     }
 
-    // CRITICAL with only MEV-pattern signals but not broad enough for CB
+    // CRITICAL with only MEV-pattern signals → Dynamic fees to extract value from attackers
+    // This handles: sandwich, frontrun, JIT liquidity
+    // Strategy: Make attacks unprofitable via high fees while keeping pool operational
     return {
       action: "MEV_PROTECTION",
-      rationale: `CRITICAL tier with MEV-pattern signals only (score ${compositeScore.toFixed(1)}). Dynamic fee escalation applied. Circuit breaker not triggered — signal types: ${[...signalTypes].join(", ")}.`,
+      rationale: `CRITICAL tier with MEV-pattern attack (score ${compositeScore.toFixed(1)}). Dynamic fees increased to 32-200 bps to make attack unprofitable. Fees benefit LPs. Signal types: ${[...signalTypes].join(", ")}.`,
     };
   }
 
   // --- ELEVATED tier decision logic ---
   if (hasOracleSignal && hasMevSignals) {
-    // Mixed signal — oracle takes priority because it's the higher-value attack vector
+    // Check if it's toxic arbitrage (moderate oracle deviation with MEV)
+    const oracleDevSignal = signals.find(
+      (s) => s.source === "ORACLE_MANIPULATION" || s.source === "CROSS_CHAIN_INCONSISTENCY"
+    );
+    const moderateOracle = oracleDevSignal && oracleDevSignal.magnitude <= 0.3;
+    
+    if (moderateOracle) {
+      // Toxic arbitrage at ELEVATED tier — use dynamic fees
+      return {
+        action: "MEV_PROTECTION",
+        rationale: `ELEVATED tier toxic arbitrage (oracle magnitude ${oracleDevSignal!.magnitude.toFixed(2)}, score ${compositeScore.toFixed(1)}). Moderate price impact with MEV patterns — dynamic fees applied.`,
+      };
+    }
+    
+    // Significant oracle deviation takes priority
     return {
       action: "ORACLE_VALIDATION",
       rationale: `ELEVATED tier with both oracle and MEV signals. Oracle validation takes priority (score ${compositeScore.toFixed(1)}).`,
@@ -789,7 +837,7 @@ export class RiskEngine extends EventEmitter {
     };
 
     pool.correlationWindow.add(scored, now);
-    this.evaluate(poolKey, pool, alert.chain, alert.pair, now);
+    this.evaluate(poolKey, pool, alert.chain, alert.pair || "UNKNOWN/UNKNOWN", now);
   }
 
   // -----------------------------------------------------------------------
