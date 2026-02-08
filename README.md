@@ -700,6 +700,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 <div align="center">
 
-**Built with ❤️ for HackMoney 2025**
+**Built with ❤️ for HackMoney 2026**
 
 </div>
