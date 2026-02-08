@@ -36,8 +36,7 @@
     "express-rate-limit": "^8.2.1",
     "socket.io": "^4.8.1",
     "viem": "^2.0.0",
-    "ws": "^8.19.0",
-    "yellow-ts": "^0.0.10"
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/chai-as-promised": "^8.0.2",
