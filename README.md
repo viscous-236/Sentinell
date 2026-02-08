@@ -575,8 +575,6 @@ Sentinel/
 │   ├── app/                   # Next.js app router
 │   ├── components/            # React components
 │   └── lib/                   # Utilities
-│
-├── PROJECT_SPEC.md            # Technical specification
 ├── TRACK_UNISWAP_V4.md        # Uniswap track submission
 ├── TRACK_LIFI.md              # LI.FI track submission
 └── TRACK_YELLOW_NETWORK.md    # Yellow Network track submission
@@ -684,8 +682,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔗 Links
 
-- **Documentation**: [PROJECT_SPEC.md](PROJECT_SPEC.md)
-- **GitHub**: [github.com/viscous-236/Sentinel](https://github.com/viscous-236/Sentinel)
+- **GitHub**: [github.com/viscous-236/Sentinel](https://github.com/viscous-236/Sentinell)
 - **Uniswap Track**: [TRACK_UNISWAP_V4.md](TRACK_UNISWAP_V4.md)
 - **LI.FI Track**: [TRACK_LIFI.md](TRACK_LIFI.md)
 - **Yellow Track**: [TRACK_YELLOW_NETWORK.md](TRACK_YELLOW_NETWORK.md)
