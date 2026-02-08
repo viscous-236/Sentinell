@@ -694,7 +694,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Uniswap Foundation** - For Uniswap v4 hooks framework
 - **LI.FI Protocol** - For cross-chain execution infrastructure
 - **Yellow Network** - For state channel technology
-- **EigenX / Phala Network** - For TEE infrastructure
+- **Oasis Rosl** - For TEE infrastructure
 
 ---
 
