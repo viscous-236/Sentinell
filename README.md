@@ -197,41 +197,54 @@ Sentinel uses a **strict separation of concerns** across four specialized agents
 
 The Risk Engine is the **core decision layer** that replaces static thresholds with adaptive, correlation-based intelligence.
 
-### Adaptive Thresholds
+### Per-Pool EMA Tracking
+
+Each pool maintains **separate EMA trackers for each signal type** (FLASH_LOAN, GAS_SPIKE, ORACLE_MANIPULATION, etc.):
 
 ```typescript
-// Exponential Moving Average per pool
-threshold_t = α × current_baseline + (1 - α) × threshold_{t-1}
+// Update EMA on each signal
+ema_t = α × magnitude + (1 - α) × ema_{t-1}  // α = 0.1
 
-// α (smoothing factor) = 0.1 for slow adaptation
-// Recomputed every N blocks
+// Adaptive threshold expands in volatile markets
+threshold = base × (1 + 2 × normalized_ema)  // 1× to 3× expansion
 ```
 
-### Correlation Windows
+**Result**: Quiet markets get tight bounds; volatile markets adapt automatically.
 
-Multi-signal fusion over sliding time windows:
+### Signal Scoring Pipeline
 
 ```typescript
-signals: [Scout, Validator, Oracle, Gas, Volume]
-window: 60 seconds
-composite_score = weighted_sum(signals)
+// 1. Score against adaptive threshold
+excess = (magnitude - threshold) / threshold
+normalized_score = min(1, excess)  // 0 to 1
+
+// 2. Apply signal weight (ORACLE_MANIPULATION=3.5, FLASH_LOAN=2.5, etc.)
+weighted_score = normalized_score × (weight / total_weights) × 100
+
+// 3. Add to correlation window (24s sliding window)
+pool.signals.push(scored_signal)
+
+// 4. Composite score = SUM of all weighted scores (not average!)
+composite = clamp(sum(weighted_scores), 0, 100)
 ```
 
-### Threat State Machine
+**Key Insight**: Individual signals score low (~20). Correlated signals (FLASH_LOAN + GAS_SPIKE + LARGE_SWAP) score 75+ → triggers defense.
+
+### Threat State Machine with Hysteresis
 
 ```
-WATCH (green)
-  ↓ score > elevated_threshold
-ELEVATED (yellow)
-  ↓ score > critical_threshold
-CRITICAL (red) → Execute Defense
-  ↓ score < critical_threshold - hysteresis
+WATCH
+  ↓ score > 35
 ELEVATED
-  ↓ score < watch_threshold
+  ↓ score > 70
+CRITICAL → Execute Defense
+  ↓ score < 50 (hysteresis gap prevents flapping)
+ELEVATED
+  ↓ score < 20
 WATCH
 ```
 
-**Hysteresis**: Prevents rapid state flapping
+**Hysteresis bands**: `{watchToElevated: {up:35, down:20}, elevatedToCritical: {up:70, down:50}}`
 
 ### Decision Output
 
