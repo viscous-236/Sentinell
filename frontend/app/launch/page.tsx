@@ -120,7 +120,7 @@ interface E2EFlow {
 }
 
 // Constants
-const API_BASE = "http://localhost:3000";
+const API_BASE = "https://p3000.m1406.test-proxy-b.rofl.app";
 const ATTACK_TYPES = [
   {
     id: "SANDWICH",
@@ -257,16 +257,23 @@ export default function DashboardPage() {
 
   const fetchInitialData = useCallback(async () => {
     try {
-      const [logsRes, execsRes, riskRes, gasRes, priceRes, flowsRes, yellowRes] =
-        await Promise.all([
-          fetch(`${API_BASE}/api/dashboard/scout-logs?limit=50`),
-          fetch(`${API_BASE}/api/dashboard/executions?limit=20`),
-          fetch(`${API_BASE}/api/dashboard/risk-scores`),
-          fetch(`${API_BASE}/api/dashboard/gas-history`),
-          fetch(`${API_BASE}/api/dashboard/price-history`),
-          fetch(`${API_BASE}/api/dashboard/e2e-flows`),
-          fetch(`${API_BASE}/api/dashboard/yellow-channels`),
-        ]);
+      const [
+        logsRes,
+        execsRes,
+        riskRes,
+        gasRes,
+        priceRes,
+        flowsRes,
+        yellowRes,
+      ] = await Promise.all([
+        fetch(`${API_BASE}/api/dashboard/scout-logs?limit=50`),
+        fetch(`${API_BASE}/api/dashboard/executions?limit=20`),
+        fetch(`${API_BASE}/api/dashboard/risk-scores`),
+        fetch(`${API_BASE}/api/dashboard/gas-history`),
+        fetch(`${API_BASE}/api/dashboard/price-history`),
+        fetch(`${API_BASE}/api/dashboard/e2e-flows`),
+        fetch(`${API_BASE}/api/dashboard/yellow-channels`),
+      ]);
 
       if (logsRes.ok) {
         const data = await logsRes.json();
@@ -321,9 +328,7 @@ export default function DashboardPage() {
       setExecutions((prev) => [...prev.slice(-19), exec]),
     );
     newSocket.on("executionUpdate", (exec: Execution) =>
-      setExecutions((prev) => 
-        prev.map((e) => (e.id === exec.id ? exec : e))
-      ),
+      setExecutions((prev) => prev.map((e) => (e.id === exec.id ? exec : e))),
     );
     newSocket.on(
       "riskUpdate",
@@ -393,7 +398,9 @@ export default function DashboardPage() {
       }
     } catch (error) {
       console.error("Simulation failed:", error);
-      alert(`Simulation failed: ${error instanceof Error ? error.message : "Network error"}`);
+      alert(
+        `Simulation failed: ${error instanceof Error ? error.message : "Network error"}`,
+      );
     } finally {
       setSimulating(false);
     }
@@ -502,24 +509,26 @@ export default function DashboardPage() {
               {e2eFlows.slice(0, 3).map((flow) => (
                 <div
                   key={flow.id}
-                  className={`p-3 rounded-lg border ${flow.status === "completed"
-                    ? "bg-green-500/5 border-green-500/20"
-                    : flow.status === "failed"
-                      ? "bg-red-500/5 border-red-500/20"
-                      : "bg-white/5 border-white/10"
-                    }`}
+                  className={`p-3 rounded-lg border ${
+                    flow.status === "completed"
+                      ? "bg-green-500/5 border-green-500/20"
+                      : flow.status === "failed"
+                        ? "bg-red-500/5 border-red-500/20"
+                        : "bg-white/5 border-white/10"
+                  }`}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs text-gray-500 font-mono">
                       {flow.poolId.substring(0, 10)}...
                     </span>
                     <span
-                      className={`text-xs px-2 py-0.5 rounded uppercase ${flow.status === "completed"
-                        ? "bg-green-900/30 text-green-400"
-                        : flow.status === "failed"
-                          ? "bg-red-900/30 text-red-400"
-                          : "bg-blue-900/30 text-blue-400"
-                        }`}
+                      className={`text-xs px-2 py-0.5 rounded uppercase ${
+                        flow.status === "completed"
+                          ? "bg-green-900/30 text-green-400"
+                          : flow.status === "failed"
+                            ? "bg-red-900/30 text-red-400"
+                            : "bg-blue-900/30 text-blue-400"
+                      }`}
                     >
                       {flow.status}
                     </span>
@@ -582,8 +591,12 @@ export default function DashboardPage() {
           <div className="bg-gradient-to-br from-[#1a1a0a]/90 to-[#0a1a2a]/90 backdrop-blur-sm rounded-xl border border-yellow-500/30 p-5 shadow-lg shadow-yellow-500/10">
             <div className="flex items-center gap-2 mb-4">
               <Radio className="w-5 h-5 text-yellow-400" />
-              <h2 className="font-semibold text-lg text-yellow-400">Yellow Network Session</h2>
-              <span className={`ml-auto text-xs px-2 py-1 rounded ${yellowChannel?.connected ? "bg-green-900/30 text-green-400" : "bg-gray-900/30 text-gray-500"}`}>
+              <h2 className="font-semibold text-lg text-yellow-400">
+                Yellow Network Session
+              </h2>
+              <span
+                className={`ml-auto text-xs px-2 py-1 rounded ${yellowChannel?.connected ? "bg-green-900/30 text-green-400" : "bg-gray-900/30 text-gray-500"}`}
+              >
                 {yellowChannel?.connected ? "ACTIVE" : "OFFLINE"}
               </span>
             </div>
@@ -592,18 +605,26 @@ export default function DashboardPage() {
               <div>
                 <div className="text-xs text-gray-500 mb-1">Session ID</div>
                 <div className="font-mono text-xs bg-black/40 border border-yellow-500/20 rounded px-2 py-1">
-                  {yellowChannel?.sessionId ? `${yellowChannel.sessionId.substring(0, 12)}...` : "Not connected"}
+                  {yellowChannel?.sessionId
+                    ? `${yellowChannel.sessionId.substring(0, 12)}...`
+                    : "Not connected"}
                 </div>
               </div>
               {/* Stats */}
               <div className="bg-gradient-to-br from-yellow-500/10 to-yellow-900/10 border border-yellow-500/20 rounded-lg p-3 space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-xs text-gray-400">Micro-Fees Accrued</span>
-                  <span className="text-sm font-semibold text-green-400">{yellowChannel?.microFeesAccrued || "0.000"} YUSD</span>
+                  <span className="text-xs text-gray-400">
+                    Micro-Fees Accrued
+                  </span>
+                  <span className="text-sm font-semibold text-green-400">
+                    {yellowChannel?.microFeesAccrued || "0.000"} YUSD
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-xs text-gray-400">State Version</span>
-                  <span className="text-sm font-semibold text-cyan-400">#{yellowChannel?.stateVersion || 0}</span>
+                  <span className="text-sm font-semibold text-cyan-400">
+                    #{yellowChannel?.stateVersion || 0}
+                  </span>
                 </div>
               </div>
             </div>
@@ -621,10 +642,11 @@ export default function DashboardPage() {
                 <button
                   key={attack.id}
                   onClick={() => setSelectedAttack(attack.id)}
-                  className={`p-3 rounded-lg border transition-all text-left ${selectedAttack === attack.id
-                    ? "bg-cyan-500/20 border-cyan-500"
-                    : "bg-white/5 border-white/10 hover:bg-white/10 hover:border-cyan-500/50"
-                    }`}
+                  className={`p-3 rounded-lg border transition-all text-left ${
+                    selectedAttack === attack.id
+                      ? "bg-cyan-500/20 border-cyan-500"
+                      : "bg-white/5 border-white/10 hover:bg-white/10 hover:border-cyan-500/50"
+                  }`}
                 >
                   <div className="text-xl mb-1">{attack.icon}</div>
                   <div className="font-medium text-xs">{attack.name}</div>
@@ -639,7 +661,8 @@ export default function DashboardPage() {
                   WETH/USDC
                 </div>
                 <div className="text-xs text-gray-500 mt-1">
-                  Pool: {POOL_ADDRESSES[selectedChain].slice(0, 6)}...{POOL_ADDRESSES[selectedChain].slice(-4)}
+                  Pool: {POOL_ADDRESSES[selectedChain].slice(0, 6)}...
+                  {POOL_ADDRESSES[selectedChain].slice(-4)}
                 </div>
               </div>
 
@@ -725,7 +748,9 @@ export default function DashboardPage() {
             <div className="bg-[#0a1a2a]/80 backdrop-blur-sm rounded-xl border border-cyan-500/20 p-5 shadow-lg shadow-cyan-500/5">
               <div className="flex items-center gap-2 mb-4">
                 <Terminal className="w-5 h-5 text-cyan-400" />
-                <h2 className="font-semibold text-lg">Scout Agent - Live Activity Monitor</h2>
+                <h2 className="font-semibold text-lg">
+                  Scout Agent - Live Activity Monitor
+                </h2>
                 <span className="ml-auto text-xs bg-cyan-900/30 text-cyan-400 px-2 py-1 rounded">
                   🔴 Live Feed
                 </span>
@@ -744,16 +769,17 @@ export default function DashboardPage() {
                         {new Date(log.timestamp).toLocaleTimeString()}
                       </span>
                       <span
-                        className={`shrink-0 w-20 text-center rounded px-2 py-0.5 text-xs font-semibold ${log.level === "ERROR"
-                          ? "bg-red-900/30 text-red-400 border border-red-500/20"
-                          : log.level === "WARN"
-                            ? "bg-yellow-900/30 text-yellow-400 border border-yellow-500/20"
-                            : log.level === "SUCCESS"
-                              ? "bg-green-900/30 text-green-400 border border-green-500/20"
-                              : log.level === "SIGNAL"
-                                ? "bg-cyan-900/30 text-cyan-400 border border-cyan-500/20"
-                                : "bg-gray-900/30 text-gray-400 border border-gray-500/20"
-                          }`}
+                        className={`shrink-0 w-20 text-center rounded px-2 py-0.5 text-xs font-semibold ${
+                          log.level === "ERROR"
+                            ? "bg-red-900/30 text-red-400 border border-red-500/20"
+                            : log.level === "WARN"
+                              ? "bg-yellow-900/30 text-yellow-400 border border-yellow-500/20"
+                              : log.level === "SUCCESS"
+                                ? "bg-green-900/30 text-green-400 border border-green-500/20"
+                                : log.level === "SIGNAL"
+                                  ? "bg-cyan-900/30 text-cyan-400 border border-cyan-500/20"
+                                  : "bg-gray-900/30 text-gray-400 border border-gray-500/20"
+                        }`}
                       >
                         {log.level}
                       </span>
@@ -766,8 +792,12 @@ export default function DashboardPage() {
                   <div className="flex h-full items-center justify-center text-gray-500">
                     <div className="text-center">
                       <RefreshCw className="w-8 h-8 mx-auto mb-2 opacity-50 animate-spin-slow" />
-                      <p className="text-sm">Waiting for Scout Agent signals...</p>
-                      <p className="text-xs mt-2 text-gray-600">Monitoring mempool, gas prices, and DEX activity</p>
+                      <p className="text-sm">
+                        Waiting for Scout Agent signals...
+                      </p>
+                      <p className="text-xs mt-2 text-gray-600">
+                        Monitoring mempool, gas prices, and DEX activity
+                      </p>
                     </div>
                   </div>
                 )}
@@ -802,12 +832,13 @@ export default function DashboardPage() {
                       stroke="currentColor"
                       strokeWidth="8"
                       strokeDasharray={`${(riskScore.current / 100) * 351} 351`}
-                      className={`transition-all duration-1000 ${riskScore.tier === "CRITICAL"
-                        ? "text-red-500"
-                        : riskScore.tier === "ELEVATED"
-                          ? "text-yellow-500"
-                          : "text-green-500"
-                        }`}
+                      className={`transition-all duration-1000 ${
+                        riskScore.tier === "CRITICAL"
+                          ? "text-red-500"
+                          : riskScore.tier === "ELEVATED"
+                            ? "text-yellow-500"
+                            : "text-green-500"
+                      }`}
                     />
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -845,12 +876,13 @@ export default function DashboardPage() {
                   {hysteresisHistory.slice(-20).map((h, i) => (
                     <div
                       key={i}
-                      className={`flex-1 rounded-t opacity-80 hover:opacity-100 transition-opacity ${h.tier === "CRITICAL"
-                        ? "bg-red-500"
-                        : h.tier === "ELEVATED"
-                          ? "bg-yellow-500"
-                          : "bg-green-500"
-                        }`}
+                      className={`flex-1 rounded-t opacity-80 hover:opacity-100 transition-opacity ${
+                        h.tier === "CRITICAL"
+                          ? "bg-red-500"
+                          : h.tier === "ELEVATED"
+                            ? "bg-yellow-500"
+                            : "bg-green-500"
+                      }`}
                       style={{ height: `${(h.score / 100) * 100}%` }}
                       title={`${h.tier}: ${h.score.toFixed(1)}`}
                     />

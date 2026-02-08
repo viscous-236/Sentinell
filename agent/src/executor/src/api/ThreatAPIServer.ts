@@ -53,7 +53,7 @@ export class ThreatAPIServer {
     this.httpServer = createServer(this.app);
     this.io = new SocketIOServer(this.httpServer, {
       cors: {
-        origin: ["http://localhost:8000", "http://localhost:3000", "http://127.0.0.1:8000", "http://127.0.0.1:3000"],
+        origin: ["*"],
         methods: ["GET", "POST"],
       },
     });
@@ -70,7 +70,7 @@ export class ThreatAPIServer {
     // CORS for frontend
     this.app.use(
       cors({
-        origin: ["http://localhost:8000", "http://localhost:3000", "http://127.0.0.1:8000", "http://127.0.0.1:3000"],
+        origin: ["*"],
         methods: ["GET", "POST", "OPTIONS"],
         allowedHeaders: ["Content-Type"],
       }),
