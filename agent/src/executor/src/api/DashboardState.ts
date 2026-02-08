@@ -471,6 +471,20 @@ export class DashboardState extends EventEmitter {
     this.emit('yellowUpdate', this.yellowChannel);
   }
 
+  /**
+   * Update Yellow session stats (called after each message published)
+   */
+  updateYellowSessionStats(stats: {
+    microFeesAccrued: string;
+    stateVersion: number;
+    totalMessages: number;
+  }): void {
+    this.yellowChannel.microFeesAccrued = stats.microFeesAccrued;
+    this.yellowChannel.stateVersion = stats.stateVersion;
+    this.yellowChannel.totalActions = stats.totalMessages;
+    this.emit('yellowUpdate', this.yellowChannel);
+  }
+
   setLastSignature(poolId: string, signature: string): void {
     this.yellowChannel.lastSignature = {
       poolId,

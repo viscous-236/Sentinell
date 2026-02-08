@@ -92,7 +92,7 @@ function loadConfig() {
     rpcUrl,
     network:
       (process.env.YELLOW_NETWORK as "sandbox" | "production") || "sandbox",
-    sentinelAddress: process.env.YELLOW_ORACLE_ETHEREUM_SEPOLIA,
+    sentinelAddress: process.env.SENTINEL_HOOK_ETHEREUM_SEPOLIA || process.env.YELLOW_ORACLE_ETHEREUM_SEPOLIA,
   };
 
   // Scout Agent config (per ScoutConfig interface in scout.ts)
@@ -460,8 +460,13 @@ function wireDashboardToAgents(): void {
     dashboardState.updateYellowChannel({ connected: false });
   });
 
-  yellowMessageBus.on('message', () => {
-    dashboardState.incrementYellowMessages();
+  // Update dashboard with live session stats whenever messages are published
+  yellowMessageBus.on('session:updated', (stats: any) => {
+    dashboardState.updateYellowSessionStats({
+      microFeesAccrued: stats.microFeesAccrued,
+      stateVersion: stats.stateVersion,
+      totalMessages: stats.totalMessages,
+    });
   });
 
   // Wire attack simulator to risk engine and executor
@@ -495,27 +500,30 @@ async function main(): Promise<void> {
   yellowMessageBus = new YellowMessageBus(config.yellow, config.yellow.sentinelAddress);
 
   try {
-    await yellowMessageBus.initialize("5"); // 5 ytest.usd for session
+    // NEW: Only connect to Yellow Network, don't create session yet
+    // Sessions can now be created on-demand via API: POST /api/yellow/session/start
+    await yellowMessageBus.connect();
 
-    // Update dashboard with Yellow session info for demo
+    // Update dashboard with Yellow connection info
     dashboardState.updateYellowChannel({
       connected: true,
-      sessionId: yellowMessageBus.getSessionId() || null,
-      sessionStartTime: Date.now(),
+      sessionId: null,  // No session yet - create on-demand
+      sessionStartTime: null,
       networkMode: config.yellow.network as 'sandbox' | 'production',
       agentAddress: config.yellow.agentAddress,
       sentinelAddress: config.yellow.sentinelAddress || '',
-      sessionBalance: '5.000',  // Initial session balance
+      sessionBalance: '0.000',
       microFeesAccrued: '0.000',
       stateVersion: 1,
       totalActions: 0,
     });
 
-    console.log("   ✅ Yellow Message Bus ready for agent communication\n");
+    console.log("   ✅ Yellow Network connected (no session yet)");
+    console.log("   💡 Create session on-demand: POST /api/yellow/session/start\n");
   } catch (error) {
-    console.error("❌ Failed to initialize Yellow Message Bus:", error);
+    console.error("❌ Failed to connect to Yellow Network:", error);
     throw new Error(
-      "Yellow Network is required for agent communication per PROJECT_SPEC.md Section 4.5",
+      "Yellow Network connection is required for agent communication per PROJECT_SPEC.md Section 4.5",
     );
   }
 
@@ -541,6 +549,13 @@ async function main(): Promise<void> {
   threatAPIServer = new ThreatAPIServer(config.threatAPI);
   await threatAPIServer.start();
   console.log("   ✅ Threat API ready for LP bot queries");
+
+  // 7.1 Inject Yellow MessageBus into Threat API for session management
+  threatAPIServer.setYellowMessageBus(yellowMessageBus);
+  console.log("   ✅ Yellow session management API ready");
+  console.log("      POST /api/yellow/session/start - Start new session");
+  console.log("      POST /api/yellow/session/end   - End current session");
+  console.log("      GET  /api/yellow/session/status - Check session status\n");
 
   // 8. Wire ALL agents through Yellow Message Bus
   //    Per PROJECT_SPEC.md Section 4.5: "Agents communicate via Yellow state channels"
@@ -657,11 +672,11 @@ async function gracefulShutdown(): Promise<void> {
     console.log("   ✅ RiskEngine stopped");
   }
 
-  // Settle Yellow session and disconnect
+  // Disconnect from Yellow Network (automatically ends active session if any)
   if (yellowMessageBus) {
-    console.log("🟡 Settling Yellow session...");
-    await yellowMessageBus.shutdown();
-    console.log("   ✅ Yellow session settled");
+    console.log("🟡 Disconnecting from Yellow Network...");
+    await yellowMessageBus.disconnect();
+    console.log("   ✅ Yellow Network disconnected");
   }
 
   console.log("\n👋 Sentinel shutdown complete.");

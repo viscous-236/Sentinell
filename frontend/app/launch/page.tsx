@@ -242,6 +242,11 @@ export default function DashboardPage() {
   const [e2eFlows, setE2EFlows] = useState<E2EFlow[]>([]);
   const [yellowChannel, setYellowChannel] = useState<any>(null);
 
+  // Yellow session management state
+  const [sessionStarting, setSessionStarting] = useState(false);
+  const [sessionEnding, setSessionEnding] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+
   // Simulation state
   const [selectedAttack, setSelectedAttack] = useState(ATTACK_TYPES[0].id);
   const [selectedChain, setSelectedChain] = useState(CHAINS[0]);
@@ -254,6 +259,16 @@ export default function DashboardPage() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Auto-clear session errors after 5 seconds
+  useEffect(() => {
+    if (sessionError) {
+      const timer = setTimeout(() => {
+        setSessionError(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [sessionError]);
 
   const fetchInitialData = useCallback(async () => {
     try {
@@ -341,6 +356,9 @@ export default function DashboardPage() {
     newSocket.on("priceUpdate", (point: PriceDataPoint) =>
       setPriceHistory((prev) => [...prev.slice(-99), point]),
     );
+    newSocket.on("yellowUpdate", (state: any) => {
+      setYellowChannel(state);
+    });
     newSocket.on("flowStarted", (flow: E2EFlow) =>
       setE2EFlows((prev) => [flow, ...prev.slice(0, 19)]),
     );
@@ -396,6 +414,63 @@ export default function DashboardPage() {
       alert(`Simulation failed: ${error instanceof Error ? error.message : "Network error"}`);
     } finally {
       setSimulating(false);
+    }
+  };
+
+  // Yellow Session Management Functions
+  const startYellowSession = async (depositAmount: string = '5') => {
+    setSessionStarting(true);
+    setSessionError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/yellow/session/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ depositAmount }),
+      });
+      const result = await res.json();
+      
+      if (res.ok && result.success) {
+        // Refresh Yellow channel state
+        await fetchInitialData();
+        console.log('✅ Yellow session started:', result.sessionId);
+      } else {
+        const errorMsg = result.error || result.message || "Failed to start session";
+        setSessionError(errorMsg);
+        console.error("Session start failed:", result);
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Network error";
+      setSessionError(errorMsg);
+      console.error("Session start error:", error);
+    } finally {
+      setSessionStarting(false);
+    }
+  };
+
+  const endYellowSession = async () => {
+    setSessionEnding(true);
+    setSessionError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/yellow/session/end`, {
+        method: "POST",
+      });
+      const result = await res.json();
+      
+      if (res.ok && result.success) {
+        // Refresh Yellow channel state
+        await fetchInitialData();
+        console.log('✅ Yellow session ended:', result.summary);
+      } else {
+        const errorMsg = result.error || result.message || "Failed to end session";
+        setSessionError(errorMsg);
+        console.error("Session end failed:", result);
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Network error";
+      setSessionError(errorMsg);
+      console.error("Session end error:", error);
+    } finally {
+      setSessionEnding(false);
     }
   };
 
@@ -582,30 +657,104 @@ export default function DashboardPage() {
           <div className="bg-gradient-to-br from-[#1a1a0a]/90 to-[#0a1a2a]/90 backdrop-blur-sm rounded-xl border border-yellow-500/30 p-5 shadow-lg shadow-yellow-500/10">
             <div className="flex items-center gap-2 mb-4">
               <Radio className="w-5 h-5 text-yellow-400" />
-              <h2 className="font-semibold text-lg text-yellow-400">Yellow Network Session</h2>
+              <h2 className="font-semibold text-lg text-yellow-400">Yellow Network</h2>
               <span className={`ml-auto text-xs px-2 py-1 rounded ${yellowChannel?.connected ? "bg-green-900/30 text-green-400" : "bg-gray-900/30 text-gray-500"}`}>
-                {yellowChannel?.connected ? "ACTIVE" : "OFFLINE"}
+                {yellowChannel?.connected ? "CONNECTED" : "OFFLINE"}
               </span>
             </div>
             <div className="space-y-3">
-              {/* Session ID */}
-              <div>
-                <div className="text-xs text-gray-500 mb-1">Session ID</div>
-                <div className="font-mono text-xs bg-black/40 border border-yellow-500/20 rounded px-2 py-1">
-                  {yellowChannel?.sessionId ? `${yellowChannel.sessionId.substring(0, 12)}...` : "Not connected"}
+              {/* Session Status */}
+              <div className="bg-gradient-to-br from-yellow-500/5 to-yellow-900/5 border border-yellow-500/20 rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-gray-400">Session Status</span>
+                  <span className={`text-xs px-2 py-0.5 rounded font-semibold ${yellowChannel?.sessionId ? "bg-green-900/30 text-green-400" : "bg-gray-900/30 text-gray-400"}`}>
+                    {yellowChannel?.sessionId ? "ACTIVE" : "NO SESSION"}
+                  </span>
                 </div>
+                {yellowChannel?.sessionId && (
+                  <div className="font-mono text-xs bg-black/40 border border-yellow-500/20 rounded px-2 py-1 break-all">
+                    {yellowChannel.sessionId.substring(0, 16)}...
+                  </div>
+                )}
               </div>
-              {/* Stats */}
-              <div className="bg-gradient-to-br from-yellow-500/10 to-yellow-900/10 border border-yellow-500/20 rounded-lg p-3 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-xs text-gray-400">Micro-Fees Accrued</span>
-                  <span className="text-sm font-semibold text-green-400">{yellowChannel?.microFeesAccrued || "0.000"} YUSD</span>
+
+              {/* Session Stats (only show if session active) */}
+              {yellowChannel?.sessionId && (
+                <div className="bg-gradient-to-br from-yellow-500/10 to-yellow-900/10 border border-yellow-500/20 rounded-lg p-3 space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-400">Micro-Fees Accrued</span>
+                    <span className="text-sm font-semibold text-green-400">{yellowChannel?.microFeesAccrued || "0.000"} YUSD</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-400">State Version</span>
+                    <span className="text-sm font-semibold text-cyan-400">#{yellowChannel?.stateVersion || 0}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-400">Total Actions</span>
+                    <span className="text-sm font-semibold text-blue-400">{yellowChannel?.totalActions || 0}</span>
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-xs text-gray-400">State Version</span>
-                  <span className="text-sm font-semibold text-cyan-400">#{yellowChannel?.stateVersion || 0}</span>
-                </div>
+              )}
+
+              {/* Session Control Buttons */}
+              <div className="pt-2 space-y-2">
+                {!yellowChannel?.sessionId ? (
+                  <button
+                    onClick={() => startYellowSession('5')}
+                    disabled={sessionStarting || !yellowChannel?.connected}
+                    className="w-full px-4 py-3 bg-gradient-to-r from-yellow-600 to-yellow-400 hover:from-yellow-500 hover:to-yellow-300 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-yellow-900/20"
+                  >
+                    {sessionStarting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Starting Session...
+                      </>
+                    ) : (
+                      <>
+                        <Radio className="w-4 h-4" />
+                        Start Yellow Session
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <button
+                    onClick={endYellowSession}
+                    disabled={sessionEnding}
+                    className="w-full px-4 py-3 bg-gradient-to-r from-red-600 to-red-400 hover:from-red-500 hover:to-red-300 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-red-900/20"
+                  >
+                    {sessionEnding ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Ending Session...
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-4 h-4" />
+                        End Yellow Session
+                      </>
+                    )}
+                  </button>
+                )}
+                
+                {!yellowChannel?.connected && (
+                  <p className="text-xs text-center text-gray-500 mt-2">
+                    Agent not connected to Yellow Network
+                  </p>
+                )}
+                
+                {yellowChannel?.connected && !yellowChannel?.sessionId && (
+                  <p className="text-xs text-center text-gray-400 mt-2">
+                    Start a session to enable off-chain coordination
+                  </p>
+                )}
               </div>
+
+              {/* Session Error Display */}
+              {sessionError && (
+                <div className="mt-2 p-2 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400">
+                  {sessionError}
+                </div>
+              )}
             </div>
           </div>
 

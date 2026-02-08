@@ -360,13 +360,14 @@ class ThreatStateMachine {
  *     - Higher fees make attacks unprofitable while benefiting LPs
  *     - Keeps pool operational
  *
- *   • ORACLE_VALIDATION: For significant price manipulation (30-75% deviation)
+ *   • ORACLE_VALIDATION: Primary defense for oracle manipulation (5-150% deviation)
  *     - Rejects swaps when Chainlink/TWAP deviation exceeds threshold
  *     - Prevents LP drainage from stale/manipulated prices
- *     - Used when oracle is the primary attack vector
+ *     - Handles normal oracle attacks (sandwich, manipulation, stale prices)
+ *     - Keeps pool operational while protecting against bad prices
  *
- *   • CIRCUIT_BREAKER: Nuclear option for catastrophic scenarios
- *     - Extreme oracle deviation (>75%) that would definitely drain LPs, OR
+ *   • CIRCUIT_BREAKER: Nuclear option for catastrophic scenarios ONLY
+ *     - Extreme oracle deviation (>150%) indicating completely broken oracle
  *     - Multi-vector attack: oracle manipulation + 4+ correlated MEV signals
  *     - Completely pauses the pool
  *     - Use sparingly - loses trading fees and user experience
@@ -442,17 +443,23 @@ function mapToDefenseAction(
     // Circuit breaker is the NUCLEAR OPTION - use it sparingly.
     // 
     // Trigger CIRCUIT_BREAKER only when:
-    // 1. Extreme oracle deviation (>75%) that could drain LPs, OR
-    // 2. Catastrophic correlation: oracle manipulation + 3+ MEV signals simultaneously
+    // 1. CATASTROPHIC oracle deviation (>150%) indicating completely broken oracle
+    // 2. Catastrophic correlation: oracle manipulation + 4+ MEV signals simultaneously
     //
+    // For normal oracle manipulation (5-150% deviation), use ORACLE_VALIDATION.
     // For pure MEV attacks (sandwich, frontrun, JIT, toxic arb), prefer dynamic
     // fee increases (MEV_PROTECTION) to keep the pool operational while extracting
     // value from attackers via higher fees that go to LPs.
     
-    const oracleDevSignal = signals.find(
+    // Use the HIGHEST magnitude oracle signal for classification, not just the first one
+    // This prevents misclassification when multiple oracle alerts exist (e.g., 15%, 35%, 75%, 95%)
+    const oracleSignals = signals.filter(
       (s) => s.source === "ORACLE_MANIPULATION" || s.source === "CROSS_CHAIN_INCONSISTENCY"
     );
-    const extremeOracle = oracleDevSignal && oracleDevSignal.magnitude > 0.75;
+    const oracleDevSignal = oracleSignals.length > 0
+      ? oracleSignals.reduce((max, s) => s.magnitude > max.magnitude ? s : max)
+      : undefined;
+    const extremeOracle = oracleDevSignal && oracleDevSignal.magnitude > 1.5;
     const moderateOracle = oracleDevSignal && oracleDevSignal.magnitude > 0.05 && oracleDevSignal.magnitude <= 0.3;
     
     // Catastrophic correlation: oracle manipulation + multiple MEV patterns
@@ -463,7 +470,7 @@ function mapToDefenseAction(
       return {
         action: "CIRCUIT_BREAKER",
         rationale: extremeOracle
-          ? `CRITICAL tier + extreme oracle deviation (magnitude ${oracleDevSignal!.magnitude.toFixed(2)}). Pool pause required to prevent LP drainage.`
+          ? `CRITICAL tier + CATASTROPHIC oracle deviation (magnitude ${oracleDevSignal!.magnitude.toFixed(2)}, >150%). Oracle completely broken — emergency pool pause required.`
           : `CRITICAL tier + ${distinctSignalCount} correlated signal types with oracle manipulation. Catastrophic multi-vector attack detected — emergency pool pause.`,
       };
     }
@@ -479,11 +486,13 @@ function mapToDefenseAction(
       };
     }
 
-    // CRITICAL with significant oracle deviation (30-75%) → Oracle validation
-    if (hasOracleSignal && !moderateOracle) {
+    // CRITICAL with oracle deviation (5-150%) → Oracle Validation is the primary defense
+    // Oracle Validation Hook rejects swaps with excessive price deviation, protecting LPs
+    // while keeping the pool operational
+    if (hasOracleSignal && !moderateOracle && !extremeOracle) {
       return {
         action: "ORACLE_VALIDATION",
-        rationale: `CRITICAL tier with oracle manipulation (magnitude ${oracleDevSignal?.magnitude.toFixed(2) || 'unknown'}, score ${compositeScore.toFixed(1)}). Oracle validation enforced; swaps will be rejected if price deviation exceeds threshold.`,
+        rationale: `CRITICAL tier with oracle manipulation (magnitude ${oracleDevSignal?.magnitude.toFixed(2) || 'unknown'}%, score ${compositeScore.toFixed(1)}). Oracle Validation activated — swaps rejected if price deviation exceeds threshold. Pool remains operational.`,
       };
     }
 
@@ -499,9 +508,13 @@ function mapToDefenseAction(
   // --- ELEVATED tier decision logic ---
   if (hasOracleSignal && hasMevSignals) {
     // Check if it's toxic arbitrage (moderate oracle deviation with MEV)
-    const oracleDevSignal = signals.find(
+    // Use the HIGHEST magnitude oracle signal for classification
+    const oracleSignals = signals.filter(
       (s) => s.source === "ORACLE_MANIPULATION" || s.source === "CROSS_CHAIN_INCONSISTENCY"
     );
+    const oracleDevSignal = oracleSignals.length > 0
+      ? oracleSignals.reduce((max, s) => s.magnitude > max.magnitude ? s : max)
+      : undefined;
     const moderateOracle = oracleDevSignal && oracleDevSignal.magnitude <= 0.3;
     
     if (moderateOracle) {

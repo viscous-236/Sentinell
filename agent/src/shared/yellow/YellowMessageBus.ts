@@ -217,58 +217,144 @@ export class YellowMessageBus extends EventEmitter {
 
     /**
      * Initialize Yellow connection and start protection session
+     * @deprecated Use connect() + startSession() for independent lifecycle management
      */
     async initialize(depositAmount: string = '10'): Promise<SessionId> {
         console.log('🟡 YellowMessageBus: Initializing...');
 
         // Connect to Yellow Network
+        await this.connect();
+
+        // Create protection session with initial state
+        return await this.startSession(depositAmount);
+    }
+
+    /**
+     * Connect to Yellow Network (without creating a session)
+     * Call this on agent startup, then create sessions on-demand
+     */
+    async connect(): Promise<void> {
+        if (this.connected) {
+            console.log('⚠️  YellowMessageBus: Already connected');
+            return;
+        }
+
+        console.log('🟡 YellowMessageBus: Connecting to Yellow Network...');
         await this.nitroliteClient.connect();
         this.connected = true;
         console.log('✅ YellowMessageBus: Connected to Yellow Network');
+        console.log('   Mode: Agent-to-Agent Communication via Yellow State Channels');
+        console.log('   Per PROJECT_SPEC.md Section 4.5: "Agents communicate via Yellow state channels"');
+        console.log('   Ready for on-demand session creation\n');
+    }
 
+    /**
+     * Start a new Yellow protection session (on-demand)
+     * Can be called multiple times to create new sessions
+     */
+    async startSession(depositAmount: string = '10'): Promise<SessionId> {
+        if (!this.connected) {
+            throw new Error('Must call connect() before starting a session');
+        }
+
+        if (this.sessionActive && this.sessionId) {
+            throw new Error(`Session already active: ${this.sessionId}. End it first with endSession()`);
+        }
+
+        console.log(`🟡 YellowMessageBus: Starting new session with ${depositAmount} ytest.usd...`);
+        
         // Create protection session with initial state
         this.sessionId = await this.nitroliteClient.createSession(depositAmount);
+        this.state = this.createEmptyState(); // Reset state for new session
         this.state.sessionId = this.sessionId || '';
         this.sessionActive = true;
 
         console.log('✅ YellowMessageBus: Protection session created');
         console.log('   Session ID:', (this.sessionId || '').substring(0, 20) + '...');
-        console.log('   Mode: Agent-to-Agent Communication via Yellow State Channels');
-        console.log('   Per PROJECT_SPEC.md Section 4.5: "Agents communicate via Yellow state channels"\n');
 
         this.emit('ready', { sessionId: this.sessionId });
+        
+        // Emit initial session stats for dashboard
+        this.emit('session:updated', this.getSessionStats());
+        
         return this.sessionId || '';
     }
 
     /**
-     * Graceful shutdown - settle session and disconnect
+     * End the current Yellow session (settle and close)
+     * Agent stays running, can create new sessions later
      */
-    async shutdown(): Promise<void> {
-        console.log('🟡 YellowMessageBus: Shutting down...');
+    async endSession(): Promise<{ sentinelReward: string; duration: number }> {
+        if (!this.sessionActive || !this.sessionId) {
+            throw new Error('No active session to end');
+        }
 
-        // Stop all polling
+        console.log(`🟡 YellowMessageBus: Ending session ${this.sessionId.substring(0, 12)}...`);
+
+        // Stop all polling for this session
         for (const [key, interval] of this.pollIntervals) {
             clearInterval(interval);
         }
         this.pollIntervals.clear();
 
-        // Settle session
+        const sessionStartTime = this.state.lastUpdate || Date.now();
+        const duration = Date.now() - sessionStartTime;
+
+        try {
+            const receipt = await this.nitroliteClient.closeSession(this.sessionId);
+            console.log(`✅ YellowMessageBus: Session settled`);
+            console.log(`   Messages processed: ${this.state.microFees.actionCount}`);
+            console.log(`   Micro-fees earned: ${receipt.sentinelReward} ytest.usd`);
+            console.log(`   Duration: ${Math.floor(duration / 1000)}s`);
+            
+            this.emit('settled', receipt);
+            
+            // Clear session state
+            this.sessionId = undefined;
+            this.sessionActive = false;
+            this.state = this.createEmptyState();
+
+            return {
+                sentinelReward: receipt.sentinelReward || '0',
+                duration: Math.floor(duration / 1000)
+            };
+        } catch (error) {
+            console.error('❌ YellowMessageBus: Failed to settle:', error);
+            // Still clear session state even on error
+            this.sessionId = undefined;
+            this.sessionActive = false;
+            this.state = this.createEmptyState();
+            throw error;
+        }
+    }
+
+    /**
+     * Disconnect from Yellow Network (call on agent shutdown)
+     * Automatically ends active session if any
+     */
+    async disconnect(): Promise<void> {
+        console.log('🟡 YellowMessageBus: Disconnecting...');
+
+        // End active session if any
         if (this.sessionActive && this.sessionId) {
             try {
-                const receipt = await this.nitroliteClient.closeSession(this.sessionId);
-                console.log(`✅ YellowMessageBus: Session settled`);
-                console.log(`   Messages processed: ${this.state.microFees.actionCount}`);
-                console.log(`   Micro-fees earned: ${receipt.sentinelReward} ytest.usd`);
-                this.emit('settled', receipt);
+                await this.endSession();
             } catch (error) {
-                console.error('❌ YellowMessageBus: Failed to settle:', error);
+                console.error('❌ Failed to end session during disconnect:', error);
             }
-            this.sessionActive = false;
         }
 
         this.nitroliteClient.disconnect();
         this.connected = false;
-        console.log('👋 YellowMessageBus: Disconnected');
+        console.log('👋 YellowMessageBus: Disconnected from Yellow Network');
+    }
+
+    /**
+     * Graceful shutdown - settle session and disconnect
+     * @deprecated Use endSession() + disconnect() for more control
+     */
+    async shutdown(): Promise<void> {
+        await this.disconnect();
     }
 
     isConnected(): boolean {
@@ -295,7 +381,9 @@ export class YellowMessageBus extends EventEmitter {
         gasPrice?: bigint;
     }): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            // Agents can still work locally without Yellow
+            return;
         }
 
         const message: ScoutSignalMessage = {
@@ -326,6 +414,9 @@ export class YellowMessageBus extends EventEmitter {
         // Sync to Yellow session
         await this.syncStateToYellow(message);
 
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
+
         console.log(`📡 [Yellow] Scout signal published: ${signal.type} (mag: ${signal.magnitude.toFixed(2)})`);
     }
 
@@ -343,7 +434,8 @@ export class YellowMessageBus extends EventEmitter {
         poolAddress?: string;
     }): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            return;
         }
 
         const message: ScoutPriceMessage = {
@@ -372,6 +464,9 @@ export class YellowMessageBus extends EventEmitter {
         // Sync to Yellow session
         await this.syncStateToYellow(message);
 
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
+
         console.log(`💰 [Yellow] Scout price published: ${price.pair} = ${price.price} (${price.chain})`);
     }
 
@@ -390,7 +485,8 @@ export class YellowMessageBus extends EventEmitter {
         evidence: any;
     }): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            return;
         }
 
         const message: ValidatorAlertMessage = {
@@ -416,6 +512,9 @@ export class YellowMessageBus extends EventEmitter {
 
         await this.syncStateToYellow(message);
 
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
+
         console.log(`🚨 [Yellow] Validator alert published: ${alert.type} (severity: ${alert.severity})`);
     }
 
@@ -437,7 +536,8 @@ export class YellowMessageBus extends EventEmitter {
         contributingSignals: string[];
     }): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            return;
         }
 
         const message: RiskDecisionMessage = {
@@ -465,6 +565,9 @@ export class YellowMessageBus extends EventEmitter {
 
         await this.syncStateToYellow(message);
 
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
+
         console.log(`🎯 [Yellow] Risk decision published: ${decision.action} (tier: ${decision.tier})`);
     }
 
@@ -483,7 +586,8 @@ export class YellowMessageBus extends EventEmitter {
         error?: string;
     }): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            return;
         }
 
         const message: ExecutorResultMessage = {
@@ -510,6 +614,9 @@ export class YellowMessageBus extends EventEmitter {
 
         await this.syncStateToYellow(message);
 
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
+
         console.log(`⚡ [Yellow] Execution result published: ${result.hookType} (success: ${result.success})`);
     }
 
@@ -530,7 +637,10 @@ export class YellowMessageBus extends EventEmitter {
      */
     async publishProtectionAuth(auth: YellowProtectionAuth, decisionId: string, poolKey: string): Promise<void> {
         if (!this.sessionActive) {
-            throw new Error('No active session');
+            // Graceful degradation: Yellow coordination only works when session is active
+            // This means off-chain protection authorization won't work without a session
+            console.warn('⚠️  [Yellow] Cannot publish protection auth: No active session');
+            return;
         }
 
         const message: ProtectionAuthMessage = {
@@ -554,6 +664,9 @@ export class YellowMessageBus extends EventEmitter {
 
         // Sync to Yellow session (OFF-CHAIN, instant)
         await this.syncStateToYellow(message);
+
+        // Emit session update event for dashboard
+        this.emit('session:updated', this.getSessionStats());
 
         console.log(`🔐 [Yellow] Protection authorization published (OFF-CHAIN, INSTANT)`);
         console.log(`   Pool: ${poolKey}`);
@@ -882,7 +995,7 @@ export class YellowMessageBus extends EventEmitter {
             sessionBalance: '0.000',  // Would need to track from Yellow balance updates
             microFeesAccrued: this.state.microFees.totalAccrued,
             stateVersion: this.state.version,
-            totalActions: this.state.microFees.actionCount,
+            totalMessages: this.state.microFees.actionCount,
         };
     }
 

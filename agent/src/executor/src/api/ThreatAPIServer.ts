@@ -21,6 +21,7 @@ import {
   PriceDataPoint,
 } from "./DashboardState";
 import { attackSimulator, AttackSimulationRequest } from "./AttackSimulator";
+import type { YellowMessageBus } from "../../../shared/yellow/YellowMessageBus";
 
 export interface ThreatAPIConfig {
   port: number;
@@ -46,6 +47,7 @@ export class ThreatAPIServer {
   private threatCache: Map<string, CachedThreat>;
   private signatureCache: Map<string, SignatureCache>;
   private cleanupInterval?: ReturnType<typeof setInterval>;
+  private yellowMessageBus?: YellowMessageBus; // Injected after construction
 
   constructor(config: ThreatAPIConfig) {
     this.config = config;
@@ -362,6 +364,160 @@ export class ThreatAPIServer {
     });
 
     // =========================================================================
+    // Yellow Session Management API
+    // =========================================================================
+
+    // Start a new Yellow session (on-demand)
+    this.app.post("/api/yellow/session/start", async (req: Request, res: Response) => {
+      try {
+        if (!this.yellowMessageBus) {
+          res.status(503).json({
+            error: "Yellow MessageBus not initialized",
+            message: "Agent is not connected to Yellow Network"
+          });
+          return;
+        }
+
+        if (this.yellowMessageBus.isActive()) {
+          res.status(400).json({
+            error: "Session already active",
+            sessionId: this.yellowMessageBus.getSessionId(),
+            message: "End the current session before starting a new one"
+          });
+          return;
+        }
+
+        const { depositAmount } = req.body;
+        const deposit = depositAmount || '5'; // Default 5 ytest.usd
+
+        console.log(`🟡 API: Starting Yellow session with ${deposit} ytest.usd deposit...`);
+        const sessionId = await this.yellowMessageBus.startSession(deposit);
+
+        // Update dashboard state
+        dashboardState.updateYellowChannel({
+          connected: true,
+          sessionId,
+          sessionStartTime: Date.now(),
+          sessionBalance: deposit,
+          microFeesAccrued: '0.000',
+          stateVersion: 1,
+          totalActions: 0,
+        });
+
+        res.json({
+          success: true,
+          sessionId,
+          deposit,
+          message: "Yellow session started successfully",
+          timestamp: Date.now()
+        });
+      } catch (error) {
+        console.error("Failed to start Yellow session:", error);
+        res.status(500).json({
+          error: "Session start failed",
+          message: error instanceof Error ? error.message : "Unknown error"
+        });
+      }
+    });
+
+    // End the current Yellow session
+    this.app.post("/api/yellow/session/end", async (req: Request, res: Response) => {
+      try {
+        if (!this.yellowMessageBus) {
+          res.status(503).json({
+            error: "Yellow MessageBus not initialized"
+          });
+          return;
+        }
+
+        if (!this.yellowMessageBus.isActive()) {
+          res.status(400).json({
+            error: "No active session",
+            message: "There is no Yellow session to end"
+          });
+          return;
+        }
+
+        const sessionId = this.yellowMessageBus.getSessionId();
+        const summary = this.yellowMessageBus.getSummary();
+
+        console.log(`🟡 API: Ending Yellow session ${sessionId?.slice(0, 12)}...`);
+        const receipt = await this.yellowMessageBus.endSession();
+
+        // Update dashboard state
+        dashboardState.updateYellowChannel({
+          connected: true,
+          sessionId: null,
+          sessionStartTime: null,
+          sessionBalance: '0.000',
+        });
+
+        res.json({
+          success: true,
+          sessionId,
+          summary: {
+            messages: summary.totalMessages,
+            microFeesEarned: receipt.sentinelReward || summary.microFeesAccrued,
+            duration: receipt.duration || 0
+          },
+          message: "Yellow session ended and settled",
+          timestamp: Date.now()
+        });
+      } catch (error) {
+        console.error("Failed to end Yellow session:", error);
+        res.status(500).json({
+          error: "Session end failed",
+          message: error instanceof Error ? error.message : "Unknown error"
+        });
+      }
+    });
+
+    // Get current Yellow session status
+    this.app.get("/api/yellow/session/status", (req: Request, res: Response) => {
+      if (!this.yellowMessageBus) {
+        res.json({
+          connected: false,
+          hasActiveSession: false,
+          message: "Yellow MessageBus not initialized"
+        });
+        return;
+      }
+
+      const isActive = this.yellowMessageBus.isActive();
+      const sessionId = this.yellowMessageBus.getSessionId();
+
+      if (isActive && sessionId) {
+        const summary = this.yellowMessageBus.getSummary();
+        const stats = this.yellowMessageBus.getSessionStats();
+        
+        res.json({
+          connected: this.yellowMessageBus.isConnected(),
+          hasActiveSession: true,
+          sessionId,
+          summary: {
+            signalCount: summary.signalCount,
+            alertCount: summary.alertCount,
+            decisionCount: summary.decisionCount,
+            executionCount: summary.executionCount,
+            totalMessages: summary.totalMessages,
+            microFeesAccrued: summary.microFeesAccrued,
+            stateVersion: summary.version
+          },
+          stats,
+          timestamp: Date.now()
+        });
+      } else {
+        res.json({
+          connected: this.yellowMessageBus.isConnected(),
+          hasActiveSession: false,
+          sessionId: null,
+          message: "No active Yellow session. Use POST /api/yellow/session/start to create one.",
+          timestamp: Date.now()
+        });
+      }
+    });
+
+    // =========================================================================
     // 404 Handler
     // =========================================================================
 
@@ -537,6 +693,9 @@ export class ThreatAPIServer {
         console.log(`   - GET  /api/signatures/:poolId`);
         console.log(`   - GET  /api/signatures`);
         console.log(`   - GET  /api/threats`);
+        console.log(`   - POST /api/yellow/session/start  (🆕 On-demand session)`);
+        console.log(`   - POST /api/yellow/session/end    (🆕 On-demand session)`);
+        console.log(`   - GET  /api/yellow/session/status (🆕 On-demand session)`);
         console.log(`   WebSocket: ws://0.0.0.0:${this.config.port}`);
 
         // Start dashboard state
@@ -551,6 +710,14 @@ export class ThreatAPIServer {
         resolve();
       });
     });
+  }
+
+  /**
+   * Inject Yellow MessageBus for session management
+   */
+  setYellowMessageBus(yellowMessageBus: YellowMessageBus): void {
+    this.yellowMessageBus = yellowMessageBus;
+    console.log("🟡 ThreatAPIServer: Yellow MessageBus injected for session management");
   }
 
   /**

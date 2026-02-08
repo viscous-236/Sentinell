@@ -688,15 +688,6 @@ contract SentinelHook is IHooks, Ownable2Step {
         paused = _paused;
     }
 
-    /**
-     * @notice Set the Yellow Oracle (DEPRECATED - No longer used)
-     *
-     * Architecture change: Executor calls hook methods directly
-     */
-    function setYellowOracle(address /* _yellowOracle */) external onlyOwner {
-        // No-op: YellowOracle integration removed
-    }
-
     /*//////////////////////////////////////////////////////////////
                            VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
