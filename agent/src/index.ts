@@ -79,8 +79,18 @@ function loadConfig() {
 
   // Derive agent address
   const { privateKeyToAccount } = require("viem/accounts");
-  const account = privateKeyToAccount(privateKey as `0x${string}`);
+
+  // Debug: Log private key info (for Render troubleshooting)
+  console.log(`   🔧 DEBUG: Private key length: ${privateKey.length}`);
+  console.log(`   🔧 DEBUG: Has 0x prefix: ${privateKey.startsWith('0x')}`);
+  console.log(`   🔧 DEBUG: First 6 chars: ${privateKey.substring(0, 6)}...`);
+
+  // Trim any whitespace that might have been added by Render
+  const cleanPrivateKey = privateKey.trim() as `0x${string}`;
+  const account = privateKeyToAccount(cleanPrivateKey);
   const agentAddress = account.address;
+
+  console.log(`   🔧 DEBUG: Derived address: ${agentAddress}`);
 
   // Yellow Network config
   // sentinelAddress: SentinelHook contract (the on-chain counterparty in Yellow state channel sessions)
@@ -88,7 +98,7 @@ function loadConfig() {
     endPoint:
       process.env.YELLOW_ENDPOINT || "wss://clearnet-sandbox.yellow.com/ws",
     agentAddress,
-    privateKey: privateKey as `0x${string}`,
+    privateKey: cleanPrivateKey,
     rpcUrl,
     network:
       (process.env.YELLOW_NETWORK as "sandbox" | "production") || "sandbox",
