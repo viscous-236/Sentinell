@@ -55,8 +55,9 @@ export class ThreatAPIServer {
     this.httpServer = createServer(this.app);
     this.io = new SocketIOServer(this.httpServer, {
       cors: {
-        origin: ["*"],
+        origin: "*",
         methods: ["GET", "POST"],
+        credentials: false
       },
     });
     this.threatCache = new Map();
@@ -72,7 +73,7 @@ export class ThreatAPIServer {
     // CORS for frontend
     this.app.use(
       cors({
-        origin: ["*"],
+        origin: "*",
         methods: ["GET", "POST", "OPTIONS"],
         allowedHeaders: ["Content-Type"],
       }),
